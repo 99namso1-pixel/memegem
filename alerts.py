@@ -35,6 +35,16 @@ def success_emoji(pct):
     if pct>=50: return "🟡"
     return "🔴"
 
+def score_label(score):
+    if score >= 9.5:
+        return "🚨 ULTRA GEM"
+    elif score >= 8:
+        return "🚀 BUY ALERT"
+    elif score >= 6:
+        return "⚡ WATCH STRONG"
+    elif score >= 4:
+        return "👀 WATCH"
+    return "🔍 SCAN"
 
 def get_alert_tier(gem):
     score = float(getattr(gem, "pre_pump_score", 0) or 0)
@@ -107,15 +117,8 @@ def build_alert(gem, rank=1):
         f"📛 {gem.name}",
         "",
         f"💰 MC: {fmt_usd(gem.mc)}  |  Liq: {fmt_usd(gem.liq)}",
-        f"🔥 SCORE: {gem.pre_pump_score}/10  {bar(gem.pre_pump_score)}",
-        "",
-"📌 SCORE GUIDE",
-"4–5   👀 WATCH",
-"6–7   ⚡ WATCH STRONG",
-"8–9   🚀 BUY ALERT",
-"9.5+  🚨 ULTRA GEM",
+       f"🔥 SCORE: {gem.pre_pump_score}/10 {score_label(gem.pre_pump_score)} {bar(gem.pre_pump_score)}",
 
-"",
         f"♻️ Old ATH Risk: {getattr(gem, 'recycled_risk', 0)}/10",
         f"{re} Rug Risk: {gem.rug_risk}/10   {bar(gem.rug_risk)}",
         "",
