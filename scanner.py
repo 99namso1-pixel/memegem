@@ -129,6 +129,8 @@ class Gem:
     position_size: str=""
     trade_verdict: str=""
     aeon_comparable: str=""  # so sánh với AEON-like pumps
+    recycled_risk: float=0.0  # rủi ro token cũ/ATH cao/dead chart
+    setup_quality: str=""
 
 
 def calc_trade_plan(gem_data: dict) -> dict:
@@ -150,6 +152,8 @@ def calc_trade_plan(gem_data: dict) -> dict:
     early_watch = bool(gem_data.get("early_watch", False))
     early_buy   = bool(gem_data.get("early_buy", False))
     early_setup = early_watch or early_buy
+    recycled_risk = float(gem_data.get("recycled_risk", 0) or 0)
+    setup_quality = str(gem_data.get("setup_quality", "") or "")
     plan    = {}
 
     # ── 1. Accumulation level ──
@@ -233,6 +237,16 @@ def calc_trade_plan(gem_data: dict) -> dict:
         max_peak_x = 3.5
     if early_setup:
         max_peak_x = max(max_peak_x, 8.0 if mc < 500_000 else 5.0)
+
+    # Nếu token cũ từng có dấu hiệu ATH/range cao rồi dump về, giảm mạnh kỳ vọng TP.
+    # Dexscreener API không trả ATH trực tiếp ổn định, nên dùng recycled_risk từ score_gem.
+    if recycled_risk >= 8:
+        max_peak_x = min(max_peak_x, 2.8)
+    elif recycled_risk >= 6:
+        max_peak_x = min(max_peak_x, 3.5)
+    elif recycled_risk >= 4:
+        max_peak_x = min(max_peak_x, 5.0)
+
     peak_x = min(peak_x, max_peak_x)
     t3_x   = min(t3_x, max(peak_x - 1.0, t2_x + 0.8))
     t2_x   = min(t2_x, max(t1_x + 0.7, t3_x - 1.0))
@@ -251,20 +265,20 @@ def calc_trade_plan(gem_data: dict) -> dict:
     plan["target1_x"]    = t1_x
     plan["target1_mc"]   = mc * t1_x
     plan["target1_days"] = fmt_days(d1)
-    plan["target1"]      = f"TP1: {t1_x}x → MC {fmt_usd(mc*t1_x)} | Sell 35% | ETA {fmt_days(d1)}"
+    plan["target1"]      = f"TP1 → MC {fmt_usd(mc*t1_x)} | Sell 35% | ETA {fmt_days(d1)}"
 
     plan["target2_x"]    = t2_x
     plan["target2_mc"]   = mc * t2_x
     plan["target2_days"] = fmt_days(d2)
-    plan["target2"]      = f"TP2: {t2_x}x → MC {fmt_usd(mc*t2_x)} | Sell 35% | ETA {fmt_days(d2)}"
+    plan["target2"]      = f"TP2 → MC {fmt_usd(mc*t2_x)} | Sell 35% | ETA {fmt_days(d2)}"
 
     plan["target3_x"]    = t3_x
     plan["target3_mc"]   = mc * t3_x
     plan["target3_days"] = fmt_days(d3)
-    plan["target3"]      = f"TP3: {t3_x}x → MC {fmt_usd(mc*t3_x)} | Sell 20% | ETA {fmt_days(d3)}"
+    plan["target3"]      = f"TP3 → MC {fmt_usd(mc*t3_x)} | Sell 20% | ETA {fmt_days(d3)}"
 
     plan["peak_x"]       = peak_x
-    plan["peak_estimate"]= f"PEAK est: {peak_x}x → MC {fmt_usd(mc*peak_x)} | Moon bag 10% | ETA {fmt_days(dpk)}"
+    plan["peak_estimate"]= f"PEAK EST → MC {fmt_usd(mc*peak_x)} | Moon bag 10% | ETA {fmt_days(dpk)}"
     plan["peak_days"]    = fmt_days(dpk)
 
     plan["median_peak_x"]    = round(base_peak, 1)
@@ -278,8 +292,8 @@ def calc_trade_plan(gem_data: dict) -> dict:
     # Không hardcode $14M nữa. Chỉ gắn nhãn nếu setup giống đoạn trước pump: MC thấp, sideway, vol/buy tăng.
     if early_setup and al in ("moderate", "heavy", "extreme") and mc < 800_000:
         plan["aeon_comparable"] = (
-            f"AEON early pattern: sideway MC thấp + volume/buy bắt đầu vào. "
-            f"Ưu tiên bắt trước pump, TP thực tế theo vùng {fmt_usd(mc*t1_x)} → {fmt_usd(mc*peak_x)}"
+            f"Early breakout pattern: sideway MC thấp + volume/buy bắt đầu vào. "
+            f"TP theo MC thực tế: {fmt_usd(mc*t1_x)} → {fmt_usd(mc*peak_x)}"
         )
     else:
         plan["aeon_comparable"] = ""
@@ -345,8 +359,17 @@ def calc_trade_plan(gem_data: dict) -> dict:
     else:          pos = "0.5-1% portfolio"
     plan["position_size"] = pos
 
-    # ── 11. Verdict ──
-    if not plan["entry_now"]:
+    # ── 11. Giảm ưu tiên nếu token cũ/ATH cao/dead-chart risk ──
+    if recycled_risk >= 7:
+        plan["entry_now"] = False
+        plan["entry_zone"] = "LOW PRIORITY — token cũ/ATH cao trước đó, không ưu tiên top"
+        plan["dca_plan"] = "Không mua breakout yếu; chỉ xem nếu reclaim volume cực mạnh"
+        plan["aeon_comparable"] = ""
+
+    # ── 12. Verdict ──
+    if recycled_risk >= 7:
+        plan["trade_verdict"] = "⚠️ LOW PRIORITY — ATH cũ cao/dead chart risk"
+    elif not plan["entry_now"]:
         plan["trade_verdict"] = "⏳ WATCH — Chờ tín hiệu rõ hơn"
     elif early_buy and rug <= 6:
         plan["trade_verdict"] = "🚀 BUY ALERT — AEON breakout đầu"
@@ -406,31 +429,52 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
     vmc  = (vol24/mc)       if mc>0 else 0.0
     lmc  = (liq/mc)         if mc>0 else 0.0
 
-    # AEON 2-TIER SETUP
-    # WATCH: còn sideway vùng thấp, chưa mua vội.
-    # BUY ALERT: breakout đầu vùng 350K-500K, trước khi pump chính/FOMO.
+    # ── Recycled / old ATH risk filter ──
+    # Dexscreener API không có ATH trực tiếp ổn định.
+    # Dùng proxy: token đã lâu, MC hiện thấp, volume/price yếu => khả năng từng pump cao rồi dump về.
+    recycled_risk = 0.0
+    setup_quality = "fresh"
+    if age_days >= 45: recycled_risk += 2.0
+    if age_days >= 90: recycled_risk += 1.5
+    if age_days >= 180: recycled_risk += 1.5
+    if mc < 800_000 and age_days >= 45: recycled_risk += 1.0
+    if vmc < 0.20 and age_days >= 45: recycled_risk += 1.5
+    if vol24 < 25_000 and age_days >= 45: recycled_risk += 1.0
+    if p24h <= 0 and p6h <= 5 and age_days >= 45: recycled_risk += 1.0
+    if bs24 < 1.8 and age_days >= 45: recycled_risk += 0.8
+    recycled_risk = round(min(10.0, recycled_risk), 1)
+    if recycled_risk >= 7:
+        setup_quality = "old_ath_high_risk"
+    elif recycled_risk >= 4:
+        setup_quality = "recycled_watch_only"
+
+    # AEON/WORLDCUP 2-TIER SETUP
+    # WATCH: sideway vùng thấp 100K-180K/350K, chưa mua vội.
+    # BUY ALERT: breakout đầu 180K-500K, trước khi pump chính/FOMO.
     early_watch = (
-        250_000 <= mc <= 350_000
-        and age_days >= 7
-        and -15 <= p24h <= 25
-        and -10 <= p6h <= 20
-        and -5 <= p1h <= 12
-        and va >= 1.15
+        90_000 <= mc <= 350_000
+        and recycled_risk < 4
+        and age_days >= 1
+        and -15 <= p24h <= 35
+        and -12 <= p6h <= 30
+        and -7 <= p1h <= 15
+        and va >= 1.10
         and bs24 >= 1.20
-        and vmc >= 0.05
-        and liq >= 40_000
+        and vmc >= 0.04
+        and liq >= 25_000
     )
     early_buy = (
-        350_000 <= mc <= 500_000
-        and age_days >= 7
-        and 6 <= p1h <= 45
-        and -5 <= p6h <= 70
-        and 0 <= p24h <= 95
-        and va >= 1.6
-        and bs1h >= 1.6
-        and bs24 >= 1.30
-        and vmc >= 0.08
-        and liq >= 40_000
+        180_000 <= mc <= 500_000
+        and recycled_risk < 4
+        and age_days >= 1
+        and 6 <= p1h <= 55
+        and -5 <= p6h <= 90
+        and 0 <= p24h <= 110
+        and va >= 1.45
+        and bs1h >= 1.4
+        and bs24 >= 1.25
+        and vmc >= 0.07
+        and liq >= 25_000
     )
     early_setup = early_watch or early_buy
 
@@ -440,10 +484,10 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
 
     if early_buy:
         total += 4.0
-        signals.append("🚀 AEON BUY: breakout đầu 350K-500K, vol/buy tăng tốc trước pump chính")
+        signals.append("🚀 BUY ALERT: breakout đầu 180K-500K, vol/buy tăng tốc trước pump chính")
     elif early_watch:
         total += 2.0
-        signals.append("👁 AEON WATCH: sideway MC thấp, volume/buy bắt đầu nhích lên")
+        signals.append("👁 WATCH: sideway MC thấp 100K-350K, volume/buy bắt đầu nhích lên")
 
     if va>3:    total+=2.5; signals.append(f"⚡ Vol tăng {va:.1f}x — tiền đột biến")
     elif va>1.5:total+=1.5; signals.append(f"📊 Vol picking up {va:.1f}x")
@@ -485,6 +529,14 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
     if bs24<0.8:     warnings.append("🚨 Sells>Buys — phân phối")
     if p24h>300:     warnings.append("🚨 Đã pump >300%")
 
+    # Phạt mạnh token cũ từng có dấu hiệu ATH cao/dead chart, không cho lên top pre-pump.
+    if recycled_risk >= 7:
+        total -= 4.5
+        warnings.append("🚫 Token cũ/ATH cao trước đó — không ưu tiên top pre-pump")
+    elif recycled_risk >= 4:
+        total -= 2.0
+        warnings.append("⚠️ Recycled chart risk — chỉ watch, không ưu tiên BUY")
+
     total = min(10.0, max(0.0, round(total,1)))
     rug=4.0
     if liq<20_000: rug+=2.5
@@ -513,7 +565,7 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
         "bs24":bs24,"bs1h":bs1h,"vol_accel":va,
         "p1h":p1h,"p24h":p24h,"vol_mc_ratio":vmc,
         "liq_mc_ratio":lmc,"age_days":age_days,
-        "score":total,"rug_risk":rug,"phase":phase,"chain":chain,"early_setup":early_setup,"early_watch":early_watch,"early_buy":early_buy,
+        "score":total,"rug_risk":rug,"phase":phase,"chain":chain,"early_setup":early_setup,"early_watch":early_watch,"early_buy":early_buy,"recycled_risk":recycled_risk,"setup_quality":setup_quality,
     })
 
     addr  = base.get("address","")
@@ -563,6 +615,8 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
         position_size=tp["position_size"],
         trade_verdict=tp["trade_verdict"],
         aeon_comparable=tp["aeon_comparable"],
+        recycled_risk=recycled_risk,
+        setup_quality=setup_quality,
     )
 
 

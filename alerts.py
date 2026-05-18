@@ -108,6 +108,7 @@ def build_alert(gem, rank=1):
         "",
         f"💰 MC: {fmt_usd(gem.mc)}  |  Liq: {fmt_usd(gem.liq)}",
         f"🔥 SCORE: {gem.pre_pump_score}/10  {bar(gem.pre_pump_score)}",
+        f"♻️ Old ATH Risk: {getattr(gem, 'recycled_risk', 0)}/10",
         f"{re} Rug Risk: {gem.rug_risk}/10   {bar(gem.rug_risk)}",
         "",
     ]
@@ -232,13 +233,13 @@ def build_summary(gems, scan_num, total):
         lines += [
             f"",
             f"{i}. {se} ${g.ticker} {g.chain.upper()} | {g.pre_pump_score}/10",
-            f"   MC:{fmt_usd(g.mc)} | {ai}{g.accumulation_level.upper()}",
+            f"   MC:{fmt_usd(g.mc)} | {ai}{g.accumulation_level.upper()} | ATH Risk:{getattr(g, 'recycled_risk', 0)}/10",
             f"   B/S:{g.bs_ratio24}x | Vol↑:{g.vol_accel}x | {fmt_pct(g.p24h)}",
             f"   {g.trade_verdict}",
-            f"   TP1:{g.target1_x}x({g.target1_days}) "
-            f"TP2:{g.target2_x}x({g.target2_days}) "
-            f"TP3:{g.target3_x}x({g.target3_days})",
-            f"   Peak est: {g.peak_x}x ({g.peak_days})",
+            f"   🎯 TP1 MC {fmt_usd(g.target1_mc)} ({g.target1_days}) | "
+            f"TP2 MC {fmt_usd(g.target2_mc)} ({g.target2_days})",
+            f"   🎯 TP3 MC {fmt_usd(g.target3_mc)} ({g.target3_days}) | "
+            f"Peak MC {fmt_usd(g.mc * g.peak_x)} ({g.peak_days})",
             f"   {g.dex_url}",
         ]
     lines += ["", f"Scanned: {total} pairs"]
