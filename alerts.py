@@ -54,8 +54,16 @@ def build_alert(gem, rank=1):
         f"📛 {gem.name}",
         f"",
         *(
-            [f"🏆 FLAT BASE BREAKOUT — {getattr(gem,'flat_base_hours',0)}h tích lũy!",f""]
+            [f"🚨 BREAKOUT CANDLE — {getattr(gem,'flat_base_hours',0)}h tích lũy VỪA VỠ!",
+             f"{'─'*36}", f""]
+            if getattr(gem,'breakout_candle',False) and getattr(gem,'flat_base',False)
+            else [f"🏆 FLAT BASE — {getattr(gem,'flat_base_hours',0)}h tích lũy, sắp bứt",f""]
             if getattr(gem,'flat_base',False) else []
+        ),
+        *(
+            [f"🎯 Pre-ATH: Token mới, chưa từng pump — còn nguyên room", f""]
+            if getattr(gem,'pre_ath',False) and getattr(gem,'age_days',999) < 7
+            and getattr(gem,'mc',0) < 1_000_000 else []
         ),
         f"🤖 {se} Pre-Pump: {gem.pre_pump_score}/10  {bar(gem.pre_pump_score)}",
         f"   {re} Rug Risk: {gem.rug_risk}/10   {bar(gem.rug_risk)}",
@@ -149,8 +157,43 @@ def build_alert(gem, rank=1):
                 lines.append(f"  {w}")
             lines.append("")
 
+    # X/Twitter Social Score block
+    x_total  = getattr(gem,"x_social_total",0)
+    x_fomo   = getattr(gem,"x_fomo_score",0)
+    x_viral  = getattr(gem,"x_viral_score",0)
+    x_kol    = getattr(gem,"x_kol_score",0)
+    x_ment   = getattr(gem,"x_mentions",0)
+    x_t1     = getattr(gem,"x_tier1",0)
+    x_t2     = getattr(gem,"x_tier2",0)
+    x_t3     = getattr(gem,"x_tier3",0)
+    x_kols   = getattr(gem,"x_kol_mentions",0)
+    x_top    = getattr(gem,"x_top_kol","")
+    x_sigs   = getattr(gem,"x_signals",[])
+    x_viral_f= getattr(gem,"x_is_viral",False)
+
+    if x_total > 0 or x_ment > 0:
+        fomo_e  = "🔥" if x_fomo>=7  else "📊" if x_fomo>=4  else "😴"
+        viral_e = "🌐" if x_viral>=7 else "📈" if x_viral>=4 else "—"
+        kol_e   = "⭐" if x_kol>=5   else "—"
+        lines += [
+            f"{'─'*36}",
+            f"🐦 X/TWITTER SOCIAL SCORE",
+            f"  FOMO:    {x_fomo}/10  {fomo_e}",
+            f"  Viral:   {x_viral}/10  {viral_e}",
+            f"  KOL:     {x_kol}/10   {kol_e}",
+            f"  TOTAL:   {x_total}/10  {'🚨VIRAL' if x_viral_f else ''}",
+            f"",
+            f"  Mentions: {x_ment} tweets",
+            f"  KOLs: T1={x_t1} T2={x_t2} T3={x_t3}",
+        ]
+        if x_top:
+            lines += [f"  🏆 TOP KOL: {x_top}"]
+        for sig in x_sigs[:3]:
+            lines.append(f"  {sig}")
+        lines.append("")
+
     if gem.signals:
-        lines.append("✅ SIGNALS")
+        lines.append("✅ ON-CHAIN SIGNALS")
         for s in gem.signals[:4]:
             lines.append(f"  {s}")
         lines.append("")

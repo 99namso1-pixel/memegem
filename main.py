@@ -15,6 +15,18 @@ from telegram import Bot
 from scanner         import hunt_sync
 from alerts          import send_gem_alerts, send_summary, send_message
 from twitter_monitor import TwitterMonitor, TOP_KOLS
+try:
+    from gmgn import analyze_token as gmgn_analyze, set_api_key as gmgn_set_key
+    GMGN_AVAILABLE = True
+except ImportError:
+    GMGN_AVAILABLE = False
+    gmgn_set_key = None
+
+try:
+    from x_monitor import get_social_score, format_social_block
+    X_AVAILABLE = True
+except ImportError:
+    X_AVAILABLE = False
 
 load_dotenv()
 logging.basicConfig(
@@ -25,9 +37,14 @@ logging.basicConfig(
 logger = logging.getLogger("GemHunter")
 
 # ── Config ──
-BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "8866269665:AAHqlzjHQBuGu8i7NBulmlgsc5E2PBLE5To")
-CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "-1003994722259")
+BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
 CHAINS     = os.getenv("CHAINS", "solana,base,ethereum").split(",")
+GMGN_KEY   = os.getenv("GMGN_API_KEY", "")
+
+# Set GMGN API key ngay khi load
+if GMGN_AVAILABLE and GMGN_KEY and gmgn_set_key:
+    gmgn_set_key(GMGN_KEY)
 INTERVAL   = int(os.getenv("SCAN_INTERVAL_MINUTES", "5")) * 60
 MIN_SCORE  = float(os.getenv("MIN_SCORE", "5.0"))
 MIN_MC     = float(os.getenv("MIN_MC", "30000"))
@@ -36,6 +53,9 @@ MIN_LIQ    = float(os.getenv("MIN_LIQUIDITY", "15000"))
 MIN_BS     = float(os.getenv("MIN_BS_RATIO", "1.2"))
 MIN_VA     = float(os.getenv("MIN_VOL_ACCEL", "1.0"))
 MAX_RUG    = float(os.getenv("MAX_RUG_RISK", "8.0"))
+MIN_AGE_H  = float(os.getenv("MIN_AGE_HOURS", "2.0"))
+X_ENABLED  = os.getenv("X_SOCIAL_ENABLED", "true").lower() == "true"
+X_TOP_N    = int(os.getenv("X_SCAN_TOP_N", "3"))
 
 # Twitter config
 TW_ENABLED  = os.getenv("TWITTER_ENABLED", "true").lower() == "true"
@@ -61,13 +81,16 @@ def cleanup_seen(seen, ttl_hours=6):
 def apply_filters(gems):
     out = []
     for g in gems:
-        if g.pre_pump_score < MIN_SCORE:         continue
-        if g.mc < MIN_MC or g.mc > MAX_MC:       continue
-        if g.liq < MIN_LIQ:                       continue
-        if g.bs_ratio24 < MIN_BS:                 continue
-        if g.vol_accel  < MIN_VA:                 continue
-        if g.rug_risk   > MAX_RUG:                continue
-        if g.phase in ("euphoric","dead","distribution"): continue
+        if g.pre_pump_score < MIN_SCORE:                  continue
+        if g.mc < MIN_MC or g.mc > MAX_MC:                continue
+        if g.liq < MIN_LIQ:                                continue
+        if g.bs_ratio24 < MIN_BS:                          continue
+        if g.vol_accel  < MIN_VA:                          continue
+        if g.rug_risk   > MAX_RUG:                         continue
+        if g.phase in ("euphoric","dead","distribution"):  continue
+        # Age filter: breakout_candle bypass age (không muốn bỏ lỡ TSG-class)
+        if g.age_days < (MIN_AGE_H/24) and not g.breakout_candle:
+            continue
         out.append(g)
     return out
 
@@ -90,6 +113,66 @@ async def gem_scanner_loop(bot: Bot, seen: dict):
 
             new_gems = [g for g in filtered if g.id not in seen]
             logger.info(f"Scan #{scan_num}: {len(all_gems)} total → {len(filtered)} filtered → {len(new_gems)} new")
+
+            # Enrich top gems với GMGN security data (max 3 để tránh rate limit)
+            if new_gems and GMGN_AVAILABLE:
+                for gem in new_gems[:3]:
+                    try:
+                        gd = await loop.run_in_executor(
+                            None, gmgn_analyze, gem.address, gem.chain)
+                        gem.gmgn_rug_score    = gd.rug_score
+                        gem.gmgn_quality      = gd.quality_score
+                        gem.gmgn_insider_pct  = gd.insider_pct
+                        gem.gmgn_dev_pct      = gd.dev_holding_pct
+                        gem.gmgn_sniper_count = gd.sniper_count
+                        gem.gmgn_sm_wallets   = gd.smart_money_wallets
+                        gem.gmgn_kol_count    = gd.kol_count
+                        gem.gmgn_lp_burned    = gd.lp_burned
+                        gem.gmgn_renounced    = gd.renounced
+                        gem.gmgn_honeypot     = gd.is_honeypot
+                        gem.gmgn_signals      = gd.signals
+                        gem.gmgn_warnings     = gd.warnings
+                        # Honeypot = skip alert
+                        if gd.is_honeypot:
+                            new_gems = [g for g in new_gems if g.id != gem.id]
+                            logger.warning(f"HONEYPOT filtered: ${gem.ticker}")
+                    except Exception as e:
+                        logger.debug(f"GMGN enrich {gem.ticker}: {e}")
+                    await asyncio.sleep(0.5)
+
+            # X/Twitter social scan cho top gems
+            if new_gems and X_AVAILABLE and X_ENABLED:
+                for gem in new_gems[:X_TOP_N]:
+                    try:
+                        ss = await loop.run_in_executor(
+                            None, get_social_score,
+                            gem.ticker, gem.address, gem.chain, True
+                        )
+                        gem.x_fomo_score   = ss.fomo_score
+                        gem.x_viral_score  = ss.viral_score
+                        gem.x_kol_score    = ss.kol_score
+                        gem.x_social_total = ss.social_total
+                        gem.x_mentions     = ss.total_mentions
+                        gem.x_kol_mentions = ss.kol_mentions
+                        gem.x_tier1        = ss.tier1_mentions
+                        gem.x_tier2        = ss.tier2_mentions
+                        gem.x_tier3        = ss.tier3_mentions
+                        gem.x_top_kol      = ss.top_kol
+                        gem.x_signals      = ss.signals
+                        gem.x_is_viral     = ss.is_viral
+                        # Bonus score nếu có KOL mention
+                        if ss.tier1_mentions >= 1:
+                            gem.pre_pump_score = min(10, gem.pre_pump_score + 2.0)
+                            logger.info(f"🚨 TIER1 KOL mention ${gem.ticker}!")
+                        elif ss.tier2_mentions >= 2:
+                            gem.pre_pump_score = min(10, gem.pre_pump_score + 1.0)
+                        elif ss.kol_mentions >= 1:
+                            gem.pre_pump_score = min(10, gem.pre_pump_score + 0.5)
+                        if ss.is_viral:
+                            gem.pre_pump_score = min(10, gem.pre_pump_score + 0.5)
+                    except Exception as e:
+                        logger.debug(f"X scan {gem.ticker}: {e}")
+                    await asyncio.sleep(1.5)
 
             if new_gems:
                 await send_gem_alerts(bot, CHAT_ID, new_gems)

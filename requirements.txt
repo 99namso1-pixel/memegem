@@ -1,6 +1,5 @@
 aiohttp==3.9.3
 python-telegram-bot==20.7
 python-dotenv==1.0.1
-asyncio==3.4.3
 requests==2.31.0
 urllib3==2.2.1
