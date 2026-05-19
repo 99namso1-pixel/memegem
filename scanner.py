@@ -590,31 +590,56 @@ def hunt_sync(chains:list) -> list:
         for b in data:
             if b.get("tokenAddress"): boost_map[b["tokenAddress"]]=b
 
-    # 2. NEW PAIRS — bắt token mới nhất (TSG ở đây)
+    # 2. NEW PAIRS — bắt token mới nhất
+    # Scan nhiều DEX endpoints: default + uniswap-v4 + pumpswap + aerodrome
     for chain in chains:
+        # Standard new pairs
         data=dex_get(f"/latest/dex/pairs/{chain}")
         new_pairs=(data.get("pairs",[]) if isinstance(data,dict) else data) or []
+
+        # Uniswap V4 specifically (BASEMAXXING deploy ở đây)
+        if chain in ("base","ethereum"):
+            v4_data=dex_get(f"/latest/dex/pairs/{chain}/uniswap-v4")
+            if v4_data:
+                v4_pairs=(v4_data.get("pairs",[]) if isinstance(v4_data,dict) else v4_data) or []
+                new_pairs.extend(v4_pairs)
+                logger.debug(f"Uniswap V4 {chain}: {len(v4_pairs)} pairs")
+
+        # Aerodrome (BASE native DEX — nhiều gem)
+        if chain == "base":
+            aero_data=dex_get(f"/latest/dex/pairs/base/aerodrome")
+            if aero_data:
+                aero_pairs=(aero_data.get("pairs",[]) if isinstance(aero_data,dict) else aero_data) or []
+                new_pairs.extend(aero_pairs)
+
+        # Filter: liq > $30K = đủ chặt để loại rug
         early=[p for p in new_pairs
-               if (p.get("fdv") or p.get("marketCap") or 0)>=8_000
-               and (p.get("liquidity") or {}).get("usd",0)>=5_000]
-        all_pairs.extend(early[:25])
-        logger.debug(f"New pairs {chain}: {len(early)}")
+               if (p.get("fdv") or p.get("marketCap") or 0) >= 15_000
+               and (p.get("liquidity") or {}).get("usd",0) >= 30_000]
+        all_pairs.extend(early[:50])
+        logger.debug(f"New pairs {chain}: {len(early)} (liq>$30K)")
         time.sleep(0.15)
 
     # 3. BASE/ETH Gainers — BASE trước, ETH sau
     chain_order = [c for c in ["base","ethereum"] if c in chains]
     for chain in chain_order:
-        for endpoint in [
+        endpoints = [
             f"/latest/dex/tokens/{chain}/gainers",
             f"/latest/dex/pairs/{chain}/new",
-        ]:
+        ]
+        # Thêm Uniswap V4 gainers riêng
+        if chain in ("base","ethereum"):
+            endpoints.append(f"/latest/dex/tokens/{chain}/trending")
+
+        for endpoint in endpoints:
             data=dex_get(endpoint)
             pairs=(data.get("pairs",[]) if isinstance(data,dict)
                    else data if isinstance(data,list) else []) or []
+            # Filter chặt: liq > $30K để loại rug
             filtered=[p for p in pairs
-                      if 8_000<=(p.get("fdv") or p.get("marketCap") or 0)<=5_000_000
-                      and (p.get("liquidity") or {}).get("usd",0)>=5_000]
-            all_pairs.extend(filtered[:20])
+                      if 15_000<=(p.get("fdv") or p.get("marketCap") or 0)<=5_000_000
+                      and (p.get("liquidity") or {}).get("usd",0)>=30_000]
+            all_pairs.extend(filtered[:30])
             time.sleep(0.15)
 
     # 4. Token profiles (boosted)
@@ -637,19 +662,21 @@ def hunt_sync(chains:list) -> list:
             sol=[p for p in pairs
                  if 8_000<=(p.get("fdv") or p.get("marketCap") or 0)<=5_000_000
                  and (p.get("liquidity") or {}).get("usd",0)>=5_000]
-            all_pairs.extend(sol[:15]); time.sleep(0.15)
+            all_pairs.extend(sol[:25]); time.sleep(0.15)
 
     # 6. Keyword search — expanded để bắt TSG-class
     keywords=["new","pump","ai","dog","cat","inu","moon","pepe","based",
               "giant","sleep","world","trump","elon","baby","doge",
-              "shib","chad","wagmi","based","the","coin","token"]
-    for q in keywords[:14]:
+              "shib","chad","wagmi","the","coin","token","eth","sol",
+              "base","frog","bird","fish","meme","gem","100x","1000x",
+              "grok","meta","agent","game","nft","dao","defi","swap"]
+    for q in keywords[:20]:
         data=dex_get(f"/latest/dex/search?q={q}")
         pairs=(data or {}).get("pairs",[])
         micro=[p for p in pairs
                if 8_000<=(p.get("fdv") or p.get("marketCap") or 0)<=3_000_000
                and (p.get("liquidity") or {}).get("usd",0)>=5_000]
-        all_pairs.extend(micro[:10]); time.sleep(0.15)
+        all_pairs.extend(micro[:15]); time.sleep(0.15)
 
     # 7. GMGN tokens
     gmgn_tokens=[]
@@ -673,7 +700,7 @@ def hunt_sync(chains:list) -> list:
         if key in seen or not addr: continue
         seen.add(key)
         gem=score_gem(pair,boost_map)
-        if gem and gem.pre_pump_score>=2.5: gems.append(gem)
+        if gem and gem.pre_pump_score>=3.5: gems.append(gem)
 
     # Score GMGN tokens
     for gt in gmgn_tokens:
@@ -718,7 +745,7 @@ def hunt_sync(chains:list) -> list:
         f"Hunt: {len(all_pairs)} dex + {len(gmgn_tokens)} gmgn "
         f"-> {len(gems)} gems (🚨breakout:{bc} 📦flat:{fb})"
     )
-    return gems[:60]
+    return gems[:150]
 
 
 async def hunt(session,chains):

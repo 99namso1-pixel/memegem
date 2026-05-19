@@ -46,14 +46,14 @@ GMGN_KEY   = os.getenv("GMGN_API_KEY", "")
 if GMGN_AVAILABLE and GMGN_KEY and gmgn_set_key:
     gmgn_set_key(GMGN_KEY)
 INTERVAL   = int(os.getenv("SCAN_INTERVAL_MINUTES", "5")) * 60
-MIN_SCORE  = float(os.getenv("MIN_SCORE", "5.0"))
-MIN_MC     = float(os.getenv("MIN_MC", "30000"))
+MIN_SCORE  = float(os.getenv("MIN_SCORE", "5.5"))
+MIN_MC     = float(os.getenv("MIN_MC", "20000"))
 MAX_MC     = float(os.getenv("MAX_MC", "5000000"))
-MIN_LIQ    = float(os.getenv("MIN_LIQUIDITY", "15000"))
+MIN_LIQ    = float(os.getenv("MIN_LIQUIDITY", "30000"))  # liq > $30K = ít rug
 MIN_BS     = float(os.getenv("MIN_BS_RATIO", "1.2"))
 MIN_VA     = float(os.getenv("MIN_VOL_ACCEL", "1.0"))
-MAX_RUG    = float(os.getenv("MAX_RUG_RISK", "8.0"))
-MIN_AGE_H  = float(os.getenv("MIN_AGE_HOURS", "2.0"))
+MAX_RUG    = float(os.getenv("MAX_RUG_RISK", "7.5"))     # chặt rug
+MIN_AGE_H  = float(os.getenv("MIN_AGE_HOURS", "0.5"))    # cho phép token 30min+
 X_ENABLED  = os.getenv("X_SOCIAL_ENABLED", "true").lower() == "true"
 X_TOP_N    = int(os.getenv("X_SCAN_TOP_N", "3"))
 
@@ -180,7 +180,8 @@ async def gem_scanner_loop(bot: Bot, seen: dict):
                     seen[g.id] = time.time()
                 save_seen(seen)
 
-            if scan_num % 6 == 0:
+            # Summary mỗi 12 scan, và chỉ khi có gems
+            if scan_num % 12 == 0 and filtered:
                 await send_summary(bot, CHAT_ID, filtered[:10], scan_num, len(all_gems))
 
         except Exception as e:
