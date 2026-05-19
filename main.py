@@ -16,7 +16,9 @@ from scanner         import hunt_sync
 from alerts          import send_gem_alerts, send_summary, send_message
 from twitter_monitor import TwitterMonitor, TOP_KOLS
 try:
-    from gmgn import analyze_token as gmgn_analyze, set_api_key as gmgn_set_key
+    from gmgn import (analyze_token as gmgn_analyze,
+                      set_api_key as gmgn_set_key,
+                      calc_dev_score, format_dev_score)
     GMGN_AVAILABLE = True
 except ImportError:
     GMGN_AVAILABLE = False
@@ -81,14 +83,30 @@ def cleanup_seen(seen, ttl_hours=6):
 def apply_filters(gems):
     out = []
     for g in gems:
-        if g.pre_pump_score < MIN_SCORE:                  continue
+        # Chain-specific thresholds
+        if g.chain == "solana":
+            min_liq   = 10_000   # SOL liq thấp hơn
+            min_score = MIN_SCORE - 0.5
+            max_rug   = MAX_RUG + 0.5
+            min_bs    = 1.0      # SOL pump nhanh, bs ratio thấp hơn cũng ok
+        elif g.chain == "base":
+            min_liq   = MIN_LIQ  # BASE giữ nguyên
+            min_score = MIN_SCORE
+            max_rug   = MAX_RUG
+            min_bs    = MIN_BS
+        else:  # ethereum
+            min_liq   = 20_000
+            min_score = MIN_SCORE
+            max_rug   = MAX_RUG
+            min_bs    = MIN_BS
+
+        if g.pre_pump_score < min_score:                  continue
         if g.mc < MIN_MC or g.mc > MAX_MC:                continue
-        if g.liq < MIN_LIQ:                                continue
-        if g.bs_ratio24 < MIN_BS:                          continue
+        if g.liq < min_liq:                                continue
+        if g.bs_ratio24 < min_bs:                          continue
         if g.vol_accel  < MIN_VA:                          continue
-        if g.rug_risk   > MAX_RUG:                         continue
+        if g.rug_risk   > max_rug:                         continue
         if g.phase in ("euphoric","dead","distribution"):  continue
-        # Age filter: breakout_candle bypass age (không muốn bỏ lỡ TSG-class)
         if g.age_days < (MIN_AGE_H/24) and not g.breakout_candle:
             continue
         out.append(g)
@@ -132,6 +150,13 @@ async def gem_scanner_loop(bot: Bot, seen: dict):
                         gem.gmgn_honeypot     = gd.is_honeypot
                         gem.gmgn_signals      = gd.signals
                         gem.gmgn_warnings     = gd.warnings
+                        # Tính Dev Quality Score
+                        ds = calc_dev_score(gd)
+                        gem.dev_score    = ds.onchain_score
+                        gem.dev_verdict  = ds.dev_verdict
+                        gem.hold_quality = ds.hold_quality
+                        gem.dev_reasons  = ds.reasons
+                        gem.dev_warnings = ds.warnings
                         # Honeypot = skip alert
                         if gd.is_honeypot:
                             new_gems = [g for g in new_gems if g.id != gem.id]

@@ -342,3 +342,147 @@ def hunt_gmgn_new_tokens(chains: list = None) -> list:
             seen.add(r["address"]); deduped.append(r)
     logger.info(f"GMGN hunt: {len(deduped)} tokens across {chains}")
     return deduped
+
+
+# ─────────────────────────────────────────────
+# DEV QUALITY SCORE
+# ─────────────────────────────────────────────
+@dataclass
+class DevScore:
+    address: str
+    # On-chain
+    lp_burned: bool = False
+    renounced: bool = False
+    dev_holding_pct: float = 0.0
+    insider_pct: float = 0.0
+    top10_pct: float = 0.0
+    sniper_count: int = 0
+    bundle_pct: float = 0.0
+    honeypot: bool = False
+    # Scores
+    onchain_score: float = 0.0    # 0-10
+    hold_quality: str = ""        # scalp/swing/hold/long_term
+    dev_verdict: str = ""         # GOOD/NEUTRAL/SUSPICIOUS/RUG
+    reasons: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+
+
+def calc_dev_score(gmgn_data: GMGNTokenData) -> DevScore:
+    """Tính dev quality score từ GMGN data."""
+    ds = DevScore(address=gmgn_data.address)
+    ds.lp_burned      = gmgn_data.lp_burned
+    ds.renounced      = gmgn_data.renounced
+    ds.dev_holding_pct= gmgn_data.dev_holding_pct
+    ds.insider_pct    = gmgn_data.insider_pct
+    ds.top10_pct      = gmgn_data.top10_holder_pct
+    ds.sniper_count   = gmgn_data.sniper_count
+    ds.bundle_pct     = gmgn_data.bundled_pct
+    ds.honeypot       = gmgn_data.is_honeypot
+
+    score = 5.0
+
+    # ── Positive signals ──
+    if ds.lp_burned:
+        score += 2.0
+        ds.reasons.append("✅ LP burned — không thể rug pool")
+    if ds.renounced:
+        score += 1.5
+        ds.reasons.append("✅ Contract renounced — không mint thêm")
+    if ds.dev_holding_pct == 0:
+        score += 1.5
+        ds.reasons.append("✅ Dev holding 0% — không giữ để dump")
+    elif ds.dev_holding_pct < 2:
+        score += 0.5
+        ds.reasons.append(f"✅ Dev holding thấp {ds.dev_holding_pct:.1f}%")
+    if ds.insider_pct < 5:
+        score += 1.0
+        ds.reasons.append(f"✅ Insider thấp {ds.insider_pct:.0f}%")
+    if ds.top10_pct < 20:
+        score += 1.0
+        ds.reasons.append(f"✅ Top10 phân tán {ds.top10_pct:.0f}%")
+    elif ds.top10_pct < 30:
+        score += 0.5
+        ds.reasons.append(f"📊 Top10 = {ds.top10_pct:.0f}%")
+    if ds.sniper_count < 5:
+        score += 0.5
+        ds.reasons.append(f"✅ Snipers ít ({ds.sniper_count})")
+
+    # ── Negative signals ──
+    if ds.honeypot:
+        score -= 8.0
+        ds.warnings.append("🚨 HONEYPOT — không bán được!")
+    if ds.dev_holding_pct > 10:
+        score -= 3.0
+        ds.warnings.append(f"🚨 Dev giữ {ds.dev_holding_pct:.0f}% — dump risk cao")
+    elif ds.dev_holding_pct > 5:
+        score -= 1.5
+        ds.warnings.append(f"⚠️ Dev giữ {ds.dev_holding_pct:.0f}%")
+    if ds.insider_pct > 30:
+        score -= 2.5
+        ds.warnings.append(f"🚨 Insider {ds.insider_pct:.0f}% — cabal control")
+    elif ds.insider_pct > 15:
+        score -= 1.0
+        ds.warnings.append(f"⚠️ Insider {ds.insider_pct:.0f}%")
+    if ds.top10_pct > 50:
+        score -= 2.0
+        ds.warnings.append(f"🚨 Top10 tập trung {ds.top10_pct:.0f}%")
+    if ds.sniper_count > 30:
+        score -= 1.5
+        ds.warnings.append(f"⚠️ {ds.sniper_count} snipers — dump risk")
+    if ds.bundle_pct > 15:
+        score -= 1.5
+        ds.warnings.append(f"⚠️ Bundle wallets {ds.bundle_pct:.0f}% — fake holders")
+    if not ds.lp_burned:
+        score -= 1.0
+        ds.warnings.append("⚠️ LP chưa burn — có thể rút pool")
+    if not ds.renounced:
+        score -= 0.5
+        ds.warnings.append("⚠️ Contract chưa renounced")
+
+    ds.onchain_score = min(10.0, max(0.0, round(score, 1)))
+
+    # Hold quality recommendation
+    if ds.onchain_score >= 8.0:
+        ds.hold_quality = "LONG TERM 🟢"
+        ds.dev_verdict  = "GOOD DEV — Hold thoải mái"
+    elif ds.onchain_score >= 6.5:
+        ds.hold_quality = "SWING 🟡"
+        ds.dev_verdict  = "NEUTRAL — Hold swing, chốt dần"
+    elif ds.onchain_score >= 5.0:
+        ds.hold_quality = "SCALP ⚠️"
+        ds.dev_verdict  = "SUSPICIOUS — Chỉ scalp, chốt sớm"
+    else:
+        ds.hold_quality = "AVOID 🔴"
+        ds.dev_verdict  = "RUG RISK — Không hold"
+
+    return ds
+
+
+def format_dev_score(ds: DevScore) -> str:
+    """Format dev score cho Telegram."""
+    score_bar = "█" * int(ds.onchain_score) + "░" * (10 - int(ds.onchain_score))
+    emoji = "🟢" if ds.onchain_score >= 8 else "🟡" if ds.onchain_score >= 6 else "🔴"
+
+    lines = [
+        f"{'─'*36}",
+        f"👨‍💻 DEV QUALITY SCORE",
+        f"  {emoji} Score: {ds.onchain_score}/10  {score_bar}",
+        f"  📋 Verdict: {ds.dev_verdict}",
+        f"  ⏱ Hold: {ds.hold_quality}",
+        f"",
+        f"  🔒 LP Burned:  {'✅ Yes' if ds.lp_burned else '❌ No'}",
+        f"  📜 Renounced:  {'✅ Yes' if ds.renounced else '❌ No'}",
+        f"  👤 Dev hold:   {ds.dev_holding_pct:.1f}%  {'✅' if ds.dev_holding_pct<2 else '⚠️' if ds.dev_holding_pct<10 else '🚨'}",
+        f"  🏠 Insider:    {ds.insider_pct:.0f}%  {'✅' if ds.insider_pct<5 else '⚠️' if ds.insider_pct<20 else '🚨'}",
+        f"  👥 Top10:      {ds.top10_pct:.0f}%  {'✅' if ds.top10_pct<20 else '⚠️' if ds.top10_pct<40 else '🚨'}",
+        f"  🎯 Snipers:    {ds.sniper_count}  {'✅' if ds.sniper_count<10 else '⚠️'}",
+    ]
+    if ds.reasons:
+        lines.append(f"")
+        for r in ds.reasons[:4]:
+            lines.append(f"  {r}")
+    if ds.warnings:
+        lines.append(f"")
+        for w in ds.warnings[:3]:
+            lines.append(f"  {w}")
+    return "\n".join(lines)

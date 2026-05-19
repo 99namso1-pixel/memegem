@@ -74,6 +74,7 @@ class Gem:
     phase:str="unknown"
     flat_base:bool=False; flat_base_hours:int=0
     breakout_candle:bool=False; pre_ath:bool=True
+    stealth_accum:bool=False; stealth_hours:int=0
     # GMGN
     gmgn_rug_score:float=0.0; gmgn_quality:float=0.0
     gmgn_insider_pct:float=0.0; gmgn_dev_pct:float=0.0
@@ -82,6 +83,12 @@ class Gem:
     gmgn_renounced:bool=False; gmgn_honeypot:bool=False
     gmgn_signals:list=field(default_factory=list)
     gmgn_warnings:list=field(default_factory=list)
+    # Dev Quality Score
+    dev_score:float=0.0
+    dev_verdict:str=""
+    hold_quality:str=""
+    dev_reasons:list=field(default_factory=list)
+    dev_warnings:list=field(default_factory=list)
     # Trade plan
     accumulation_level:str="none"
     entry_now:bool=False; entry_zone:str=""
@@ -214,11 +221,18 @@ def calc_trade_plan(gd:dict) -> dict:
     })
 
     # Entry zone
+    stealth = gd.get("stealth_accum", False)
+
     if flat_base and breakout_c:
         plan["entry_now"]=True
         plan["entry_zone"]="🚨 VÀO NGAY — Breakout candle, tích lũy vừa vỡ"
         plan["entry_mc_low"]=mc*0.97; plan["entry_mc_high"]=mc*1.15
         plan["dca_plan"]=f"60% NGAY tại MC {fmt_usd(mc)} + 40% retest {fmt_usd(mc*0.88)}"
+    elif stealth and not flat_base:
+        plan["entry_now"]=True
+        plan["entry_zone"]=f"🐋 TÍCH LŨY — Vào dần trong lúc whale đang gom"
+        plan["entry_mc_low"]=mc*0.92; plan["entry_mc_high"]=mc*1.05
+        plan["dca_plan"]=f"DCA 3 lần: 33% ngay + 33% dip {fmt_usd(mc*0.90)} + 33% dip {fmt_usd(mc*0.82)}"
     elif phase in ("stealth","accumulation") and al in ("heavy","extreme"):
         plan["entry_now"]=True
         plan["entry_zone"]="MUA NGAY — SM/Whale đang gom mạnh"
@@ -327,8 +341,14 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     if mc < 10_000:     return None
     if p24h > 900:      return None
     if p24h < -80:      return None
-    # Liq filter: nới lỏng cho micro cap (TSG có $50K liq tại $35K MC)
-    min_liq = 5_000 if mc < 100_000 else 10_000 if mc < 500_000 else 20_000
+    # Liq filter theo chain
+    if chain == "solana":
+        # PumpSwap/PumpFun: liq thấp hơn nhiều vì pool SOL nhỏ
+        min_liq = 3_000  if mc < 50_000   else                   5_000  if mc < 200_000  else                   8_000  if mc < 500_000  else 15_000
+    elif chain == "base":
+        min_liq = 10_000 if mc < 100_000  else                   20_000 if mc < 500_000  else 30_000
+    else:  # ethereum
+        min_liq = 8_000  if mc < 100_000  else                   15_000 if mc < 500_000  else 25_000
     if liq < min_liq:   return None
 
     total=0.0; signals=[]; warnings=[]
@@ -338,9 +358,10 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     vmc =(vol24/mc)       if mc>0 else 0.0
     lmc =(liq/mc)         if mc>0 else 0.0
 
-    # ── FLAT BASE + BREAKOUT DETECTION ──
+    # ── FLAT BASE + BREAKOUT + STEALTH ACCUMULATION DETECTION ──
     flat_base=False; flat_base_score=0.0; flat_base_hours=0
     breakout_candle=False; pre_ath=True; vol_spike_1h=va>2.0
+    stealth_accum=False; stealth_score=0.0  # whale gom âm thầm
 
     age_ok = age_days >= 0.08   # >= 2h
 
@@ -388,7 +409,57 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
         if vol_spike_1h: flat_base_score+=1.0
         if breakout_candle: flat_base_score+=2.0
 
+    # ── STEALTH ACCUMULATION DETECTION ──
+    # Pattern: MANIFEST ngày 17 May — whale gom âm thầm
+    # Vol 24h cao hơn vol 6h bất thường = tiền vào đều đặn không spike
+    # Giá không tăng nhiều dù có buying = whale absorb selling pressure
+    #
+    # Signals:
+    # 1. MC sideways (|p24h| < 20%) nhưng vol24 cao relative to liq
+    # 2. Buys > Sells đều đặn (bs24 > 1.3x) nhưng giá không bứt
+    # 3. Vol đang build up: vol6 > vol24/4 (nghĩa là 6h sau nhiều hơn avg)
+    # 4. Age > 12h (không phải token quá mới)
+    # 5. Liq tốt (whale cần liq để gom)
+
+    vol_building   = vol6 > (vol24 / 4) * 0.8   # vol 6h gần bằng avg = đang build
+    price_suppress = abs(p24h) < 25              # giá bị kìm, không pump dù có buy
+    whale_buying   = bs24 >= 1.1 and buys24 >= 30  # mua đều đặn (1.1x đủ nếu kéo dài)
+    mature_token   = age_days >= 0.5             # token đủ tuổi
+    good_liq       = liq >= 50_000               # liq tốt = có whale gom được
+    vol_vs_liq     = vmc >= 0.2                  # vol đủ lớn so với MC (0.2 = $200K vol / $1M MC)
+
+    # MANIFEST pattern: token 2d tuổi, vol24 cao, giá flat, bs > 1.3
+    if (mature_token and price_suppress and whale_buying
+            and vol_building and vol_vs_liq and not flat_base):
+        stealth_accum = True
+        stealth_score = 2.0
+
+        # Bonus nếu liq tốt và token đủ mature
+        if good_liq:          stealth_score += 1.0
+        if bs24 >= 2.0:       stealth_score += 1.0  # mua mạnh hơn
+        if vmc >= 0.5:        stealth_score += 0.5  # vol mạnh
+        if age_days >= 1.0:   stealth_score += 0.5  # 1+ ngày tuổi = ổn định hơn
+        if age_days >= 2.0:   stealth_score += 0.5  # 2+ ngày = whale đã gom lâu
+        if age_days >= 1.0 and vmc >= 0.3: stealth_score += 0.5  # vol lớn kéo dài = SM gom
+        # TOLYBOT/MANIFEST pattern: B/S thấp nhưng đều + vol cao = whale absorb sells
+        if bs24 >= 1.1 and vmc >= 0.2 and age_days >= 1.0:
+            stealth_score += 1.0
+            flat_base_hours = max(flat_base_hours, int(age_days * 12))  # estimate hours
+
+        # Estimate thời gian đã tích lũy
+        if age_days >= 2:     flat_base_hours = 15  # như MANIFEST
+        elif age_days >= 1:   flat_base_hours = 8
+        else:                 flat_base_hours = 4
+
     # ── SCORING ──
+
+    # Stealth accumulation bonus (phát hiện TRONG lúc tích lũy)
+    if stealth_accum:
+        total += stealth_score
+        if bs24 >= 2.0 and good_liq:
+            signals.append(f"🐋 STEALTH ACCUM: {flat_base_hours}h whale gom âm thầm — giá flat + vol cao")
+        else:
+            signals.append(f"👁 STEALTH ACCUM: {flat_base_hours}h tích lũy — buys>{bs24:.1f}x sells, giá không tăng")
 
     # Flat base bonus (cao nhất)
     if flat_base and breakout_candle and pre_ath:
@@ -510,8 +581,9 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
 
     # Phase
     if p24h>300 or mc>10_000_000:          phase="euphoric"
-    elif post_ath_dump:                    phase="distribution"  # đã có ATH cao, đang dead
+    elif post_ath_dump:                    phase="distribution"
     elif flat_base and breakout_candle:    phase="expansion"
+    elif stealth_accum:                    phase="accumulation"  # MANIFEST pattern
     elif flat_base and vol_spike_1h:       phase="accumulation"
     elif flat_base:                         phase="accumulation"
     elif p24h>80 or mc>3_000_000:          phase="expansion"
@@ -528,6 +600,7 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
         "score":total,"rug_risk":rug,"phase":phase,"chain":chain,
         "flat_base":flat_base,"vol_spike_1h":vol_spike_1h,
         "breakout_candle":breakout_candle,
+        "stealth_accum":stealth_accum,
         "age_days":age_days,
     })
 
@@ -554,6 +627,7 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
         pre_pump_score=total,rug_risk=rug,phase=phase,
         flat_base=flat_base,flat_base_hours=flat_base_hours,
         breakout_candle=breakout_candle,pre_ath=pre_ath,
+        stealth_accum=stealth_accum,stealth_hours=flat_base_hours,
         signals=signals,warnings=warnings,
         accumulation_level=tp["accumulation_level"],
         entry_now=tp["entry_now"],entry_zone=tp["entry_zone"],
@@ -654,15 +728,38 @@ def hunt_sync(chains:list) -> list:
             pairs=data if isinstance(data,list) else (data or {}).get("pairs",[])
             all_pairs.extend(pairs or []); time.sleep(0.2)
 
-    # 5. SOL trending h1/h6
+    # 5. SOL — PumpSwap + PumpFun + Trending
     if "solana" in chains:
+        # PumpSwap new pairs (TOESCOIN-class)
+        for dex_id in ["pumpswap","pump-fun","raydium","orca"]:
+            data=dex_get(f"/latest/dex/pairs/solana/{dex_id}")
+            if data:
+                pairs=(data.get("pairs",[]) if isinstance(data,dict) else data) or []
+                fresh=[p for p in pairs
+                       if (p.get("fdv") or p.get("marketCap") or 0) >= 5_000
+                       and (p.get("liquidity") or {}).get("usd",0) >= 8_000]
+                all_pairs.extend(fresh[:40])
+                logger.debug(f"SOL {dex_id}: {len(fresh)} pairs")
+                time.sleep(0.15)
+
+        # SOL trending h1/h6/h24
         for tf in ["h1","h6"]:
             data=dex_get(f"/latest/dex/tokens/solana/trending/{tf}")
             pairs=(data or {}).get("pairs",[])
             sol=[p for p in pairs
-                 if 8_000<=(p.get("fdv") or p.get("marketCap") or 0)<=5_000_000
-                 and (p.get("liquidity") or {}).get("usd",0)>=5_000]
+                 if 5_000<=(p.get("fdv") or p.get("marketCap") or 0)<=5_000_000
+                 and (p.get("liquidity") or {}).get("usd",0)>=8_000]
             all_pairs.extend(sol[:25]); time.sleep(0.15)
+
+        # SOL gainers
+        data=dex_get("/latest/dex/tokens/solana/gainers")
+        if data:
+            pairs=(data.get("pairs",[]) if isinstance(data,dict) else [])
+            gainers=[p for p in pairs
+                     if 5_000<=(p.get("fdv") or p.get("marketCap") or 0)<=5_000_000
+                     and (p.get("liquidity") or {}).get("usd",0)>=8_000]
+            all_pairs.extend(gainers[:20])
+            time.sleep(0.15)
 
     # 6. Keyword search — expanded để bắt TSG-class
     keywords=["new","pump","ai","dog","cat","inu","moon","pepe","based",
@@ -678,7 +775,7 @@ def hunt_sync(chains:list) -> list:
                and (p.get("liquidity") or {}).get("usd",0)>=5_000]
         all_pairs.extend(micro[:15]); time.sleep(0.15)
 
-    # 7. GMGN tokens
+    # 7. GMGN tokens — SOL new pairs qua GMGN (bắt PumpFun/PumpSwap gems)
     gmgn_tokens=[]
     if GMGN_AVAILABLE:
         try:

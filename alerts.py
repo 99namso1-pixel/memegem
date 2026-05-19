@@ -57,6 +57,9 @@ def build_alert(gem, rank=1):
             [f"🚨 BREAKOUT CANDLE — {getattr(gem,'flat_base_hours',0)}h tích lũy VỪA VỠ!",
              f"{'─'*36}", f""]
             if getattr(gem,'breakout_candle',False) and getattr(gem,'flat_base',False)
+            else [f"🐋 STEALTH ACCUM — {getattr(gem,'stealth_hours',0)}h whale gom âm thầm!",
+                  f"💡 Vào DCA trong lúc tích lũy — trước khi breakout", f""]
+            if getattr(gem,'stealth_accum',False)
             else [f"🏆 FLAT BASE — {getattr(gem,'flat_base_hours',0)}h tích lũy, sắp bứt",f""]
             if getattr(gem,'flat_base',False) else []
         ),
@@ -190,6 +193,33 @@ def build_alert(gem, rank=1):
             lines += [f"  🏆 TOP KOL: {x_top}"]
         for sig in x_sigs[:3]:
             lines.append(f"  {sig}")
+        lines.append("")
+
+    # Dev Quality Score block
+    dev_s = getattr(gem,"dev_score",0)
+    dev_v = getattr(gem,"dev_verdict","")
+    hold_q= getattr(gem,"hold_quality","")
+    dev_r = getattr(gem,"dev_reasons",[])
+    dev_w = getattr(gem,"dev_warnings",[])
+
+    if dev_s > 0 or dev_v:
+        dev_e = "🟢" if dev_s>=8 else "🟡" if dev_s>=6 else "🔴"
+        bar_d = "█"*int(dev_s) + "░"*(10-int(dev_s))
+        lines += [
+            f"{'─'*36}",
+            f"👨‍💻 DEV QUALITY",
+            f"  {dev_e} Score: {dev_s}/10  {bar_d}",
+            f"  📋 {dev_v}",
+            f"  ⏱ Hold strategy: {hold_q}",
+        ]
+        if dev_r:
+            lines.append("")
+            for r in dev_r[:3]:
+                lines.append(f"  {r}")
+        if dev_w:
+            lines.append("")
+            for w in dev_w[:3]:
+                lines.append(f"  {w}")
         lines.append("")
 
     if gem.signals:
