@@ -8,6 +8,11 @@ scanner.py v5 — Pre-Pump Scanner với TP Engine cải thiện
 """
 
 import requests, time, logging, urllib3
+try:
+    from gmgn import hunt_gmgn_new_tokens, analyze_token as gmgn_analyze, GMGNTokenData
+    GMGN_AVAILABLE = True
+except ImportError:
+    GMGN_AVAILABLE = False
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -106,6 +111,20 @@ class Gem:
     has_website: bool=False; has_socials: bool=False
     pre_pump_score: float=0; rug_risk: float=5.0
     phase: str="unknown"
+    flat_base: bool=False; flat_base_hours: int=0
+    # GMGN enriched data
+    gmgn_rug_score: float=0.0
+    gmgn_quality: float=0.0
+    gmgn_insider_pct: float=0.0
+    gmgn_dev_pct: float=0.0
+    gmgn_sniper_count: int=0
+    gmgn_sm_wallets: int=0
+    gmgn_kol_count: int=0
+    gmgn_lp_burned: bool=False
+    gmgn_renounced: bool=False
+    gmgn_honeypot: bool=False
+    gmgn_signals: list=field(default_factory=list)
+    gmgn_warnings: list=field(default_factory=list)
     signals: list=field(default_factory=list)
     warnings: list=field(default_factory=list)
     # Trade plan
@@ -129,8 +148,6 @@ class Gem:
     position_size: str=""
     trade_verdict: str=""
     aeon_comparable: str=""  # so sánh với AEON-like pumps
-    recycled_risk: float=0.0  # rủi ro token cũ/ATH cao/dead chart
-    setup_quality: str=""
 
 
 def calc_trade_plan(gem_data: dict) -> dict:
@@ -149,11 +166,6 @@ def calc_trade_plan(gem_data: dict) -> dict:
     phase   = gem_data["phase"]
     chain   = gem_data["chain"]
     score   = gem_data["score"]
-    early_watch = bool(gem_data.get("early_watch", False))
-    early_buy   = bool(gem_data.get("early_buy", False))
-    early_setup = early_watch or early_buy
-    recycled_risk = float(gem_data.get("recycled_risk", 0) or 0)
-    setup_quality = str(gem_data.get("setup_quality", "") or "")
     plan    = {}
 
     # ── 1. Accumulation level ──
@@ -196,20 +208,11 @@ def calc_trade_plan(gem_data: dict) -> dict:
         mc_mult = 0.5
 
     # ── 4. Momentum boost ──
-    # Ưu tiên bắt TRƯỚC pump: p1h/p24h còn thấp nhưng volume & buys bắt đầu tăng.
-    # Nếu đã pump mạnh thì giảm target và không FOMO.
-    if p24h > 120 or p1h > 60:
-        mom_mult = 0.45   # đã pump mạnh, reduce targets
-    elif p24h > 60 or p1h > 35:
-        mom_mult = 0.60   # late breakout
-    elif p1h > 20:
-        mom_mult = 0.80
-    elif early_setup:
-        mom_mult = 1.15   # đẹp nhất: accumulation trước pump
-    elif p1h > 5:
-        mom_mult = 1.0
-    else:
-        mom_mult = 1.05
+    # Nếu 1h đang tăng mạnh = pump đang diễn ra, điều chỉnh targets
+    if p1h > 50:   mom_mult = 0.7   # đã pump, reduce targets
+    elif p1h > 20: mom_mult = 0.85
+    elif p1h > 5:  mom_mult = 1.0
+    else:          mom_mult = 1.1   # flat = sắp bứt
 
     # ── 5. Tính TPs ──
     base_peak   = pd["median_peak"] * mc_mult * mom_mult
@@ -225,32 +228,6 @@ def calc_trade_plan(gem_data: dict) -> dict:
     # Peak estimate
     peak_x = max(t3_x + 3, round(base_p75, 1))
 
-    # Không phóng đại kiểu hardcode AEON 14M.
-    # Bot chỉ dự báo thực tế theo MC hiện tại + accumulation level.
-    if al == "extreme":
-        max_peak_x = 15.0 if mc < 500_000 else 10.0 if mc < 1_000_000 else 6.0
-    elif al == "heavy":
-        max_peak_x = 10.0 if mc < 500_000 else 7.0 if mc < 1_000_000 else 4.5
-    elif al == "moderate":
-        max_peak_x = 6.0 if mc < 500_000 else 4.0 if mc < 1_000_000 else 3.0
-    else:
-        max_peak_x = 3.5
-    if early_setup:
-        max_peak_x = max(max_peak_x, 8.0 if mc < 500_000 else 5.0)
-
-    # Nếu token cũ từng có dấu hiệu ATH/range cao rồi dump về, giảm mạnh kỳ vọng TP.
-    # Dexscreener API không trả ATH trực tiếp ổn định, nên dùng recycled_risk từ score_gem.
-    if recycled_risk >= 8:
-        max_peak_x = min(max_peak_x, 2.8)
-    elif recycled_risk >= 6:
-        max_peak_x = min(max_peak_x, 3.5)
-    elif recycled_risk >= 4:
-        max_peak_x = min(max_peak_x, 5.0)
-
-    peak_x = min(peak_x, max_peak_x)
-    t3_x   = min(t3_x, max(peak_x - 1.0, t2_x + 0.8))
-    t2_x   = min(t2_x, max(t1_x + 0.7, t3_x - 1.0))
-
     # Thời gian ước tính (điều chỉnh theo momentum)
     spd = 1.0
     if p1h > 30: spd = 0.4   # đang pump nhanh
@@ -265,20 +242,20 @@ def calc_trade_plan(gem_data: dict) -> dict:
     plan["target1_x"]    = t1_x
     plan["target1_mc"]   = mc * t1_x
     plan["target1_days"] = fmt_days(d1)
-    plan["target1"]      = f"TP1 → MC {fmt_usd(mc*t1_x)} | Sell 35% | ETA {fmt_days(d1)}"
+    plan["target1"]      = f"TP1: {t1_x}x → MC {fmt_usd(mc*t1_x)} | Sell 35% | ETA {fmt_days(d1)}"
 
     plan["target2_x"]    = t2_x
     plan["target2_mc"]   = mc * t2_x
     plan["target2_days"] = fmt_days(d2)
-    plan["target2"]      = f"TP2 → MC {fmt_usd(mc*t2_x)} | Sell 35% | ETA {fmt_days(d2)}"
+    plan["target2"]      = f"TP2: {t2_x}x → MC {fmt_usd(mc*t2_x)} | Sell 35% | ETA {fmt_days(d2)}"
 
     plan["target3_x"]    = t3_x
     plan["target3_mc"]   = mc * t3_x
     plan["target3_days"] = fmt_days(d3)
-    plan["target3"]      = f"TP3 → MC {fmt_usd(mc*t3_x)} | Sell 20% | ETA {fmt_days(d3)}"
+    plan["target3"]      = f"TP3: {t3_x}x → MC {fmt_usd(mc*t3_x)} | Sell 20% | ETA {fmt_days(d3)}"
 
     plan["peak_x"]       = peak_x
-    plan["peak_estimate"]= f"PEAK EST → MC {fmt_usd(mc*peak_x)} | Moon bag 10% | ETA {fmt_days(dpk)}"
+    plan["peak_estimate"]= f"PEAK est: {peak_x}x → MC {fmt_usd(mc*peak_x)} | Moon bag 10% | ETA {fmt_days(dpk)}"
     plan["peak_days"]    = fmt_days(dpk)
 
     plan["median_peak_x"]    = round(base_peak, 1)
@@ -288,29 +265,27 @@ def calc_trade_plan(gem_data: dict) -> dict:
     plan["success_rate_tp3"] = pd["success_tp3"]
     plan["hold_period"]      = f"{fmt_days(d1)} → {fmt_days(dpk)}"
 
-    # ── 6. So sánh AEON early pattern ──
-    # Không hardcode $14M nữa. Chỉ gắn nhãn nếu setup giống đoạn trước pump: MC thấp, sideway, vol/buy tăng.
-    if early_setup and al in ("moderate", "heavy", "extreme") and mc < 800_000:
+    # ── 6. So sánh AEON ──
+    # AEON: entry ~$500-800K MC, đạt $14M trong 6 ngày = ~20-28x
+    aeon_x = 14_000_000 / max(mc, 1)
+    if aeon_x > 5 and al in ("heavy","extreme") and mc < 2_000_000:
         plan["aeon_comparable"] = (
-            f"Early breakout pattern: sideway MC thấp + volume/buy bắt đầu vào. "
-            f"TP theo MC thực tế: {fmt_usd(mc*t1_x)} → {fmt_usd(mc*peak_x)}"
+            f"AEON-class pump potential: nếu theo pattern AEON "
+            f"(${fmt_usd(mc)} → $14M = {aeon_x:.0f}x trong 6 ngày)"
         )
     else:
         plan["aeon_comparable"] = ""
 
     # ── 7. Entry zone (dùng MC thay price) ──
-    if early_buy and phase in ("stealth","accumulation","expansion"):
+    flat_base = gem_data.get("flat_base", False)
+    vol_spike = gem_data.get("vol_spike_1h", False)
+
+    if flat_base and vol_spike:
         plan["entry_now"]     = True
-        plan["entry_zone"]    = "BUY ALERT — AEON breakout đầu, vùng đẹp trước pump chính"
-        plan["entry_mc_low"]  = mc * 0.95
-        plan["entry_mc_high"] = mc * 1.08
-        plan["dca_plan"]      = f"50% ngay tại MC {fmt_usd(mc)} + 50% nếu retest về {fmt_usd(mc*0.90)}"
-    elif early_watch and phase in ("stealth","accumulation"):
-        plan["entry_now"]     = False
-        plan["entry_zone"]    = "WATCH — AEON setup sớm, chờ breakout xác nhận"
-        plan["entry_mc_low"]  = mc * 0.95
-        plan["entry_mc_high"] = mc * 1.15
-        plan["dca_plan"]      = f"Chưa mua vội. Chờ MC vượt {fmt_usd(max(mc*1.08, 350000))} + vol/buy tăng tốc"
+        plan["entry_zone"]    = "BREAKOUT NOW — Flat base vỡ sau 8-12h tích lũy"
+        plan["entry_mc_low"]  = mc * 0.98
+        plan["entry_mc_high"] = mc * 1.12
+        plan["dca_plan"]      = f"60% ngay (breakout confirm) + 40% nếu retest {fmt_usd(mc*0.92)}"
     elif phase in ("stealth","accumulation") and al in ("heavy","extreme"):
         plan["entry_now"]     = True
         plan["entry_zone"]    = "MUA NGAY — SM/Whale đang gom mạnh"
@@ -359,24 +334,11 @@ def calc_trade_plan(gem_data: dict) -> dict:
     else:          pos = "0.5-1% portfolio"
     plan["position_size"] = pos
 
-    # ── 11. Giảm ưu tiên nếu token cũ/ATH cao/dead-chart risk ──
-    if recycled_risk >= 7:
-        plan["entry_now"] = False
-        plan["entry_zone"] = "LOW PRIORITY — token cũ/ATH cao trước đó, không ưu tiên top"
-        plan["dca_plan"] = "Không mua breakout yếu; chỉ xem nếu reclaim volume cực mạnh"
-        plan["aeon_comparable"] = ""
-
-    # ── 12. Verdict ──
-    if recycled_risk >= 7:
-        plan["trade_verdict"] = "⚠️ LOW PRIORITY — ATH cũ cao/dead chart risk"
-    elif not plan["entry_now"]:
+    # ── 11. Verdict ──
+    if not plan["entry_now"]:
         plan["trade_verdict"] = "⏳ WATCH — Chờ tín hiệu rõ hơn"
-    elif early_buy and rug <= 6:
-        plan["trade_verdict"] = "🚀 BUY ALERT — AEON breakout đầu"
-    elif early_watch:
-        plan["trade_verdict"] = "👁 WATCH — AEON setup, chờ breakout"
     elif al == "extreme" and rug <= 5:
-        plan["trade_verdict"] = "🚀 STRONG BUY — SM accumulation"
+        plan["trade_verdict"] = "🚀 STRONG BUY — AEON-class setup"
     elif al == "heavy" and rug <= 6:
         plan["trade_verdict"] = "✅ BUY — Heavy SM accumulation"
     elif al == "moderate":
@@ -401,7 +363,7 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
     base = pair.get("baseToken") or {}
     if not base.get("address"): return None
 
-    mc    = float(pair.get("marketCap") or pair.get("fdv") or 0)
+    mc    = float(pair.get("fdv") or pair.get("marketCap") or 0)
     liq   = float((pair.get("liquidity") or {}).get("usd") or 0)
     vol24 = float((pair.get("volume") or {}).get("h24") or 0)
     vol6  = float((pair.get("volume") or {}).get("h6")  or 0)
@@ -419,8 +381,15 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
     age_days = ((time.time()*1000 - created)/86_400_000) if created else 999
     chain    = (pair.get("chainId") or "").lower()
 
-    if liq < 15_000 or mc > 20_000_000 or mc < 30_000: return None
-    if p24h > 600   or p24h < -60:                      return None
+    # Filter cơ bản — nới lỏng cho micro cap early
+    if mc > 20_000_000: return None       # đã to quá
+    if mc < 20_000:     return None       # dust
+    if p24h > 800:      return None       # đã pump điên
+    if p24h < -70:      return None       # đang chết
+
+    # Liq threshold theo MC — micro cap chấp nhận liq thấp hơn
+    min_liq = 8_000 if mc < 200_000 else 15_000
+    if liq < min_liq: return None
 
     total=0.0; signals=[]; warnings=[]
     bs24 = (buys24/sells24) if sells24>0 else (9.0 if buys24>0 else 1.0)
@@ -429,65 +398,51 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
     vmc  = (vol24/mc)       if mc>0 else 0.0
     lmc  = (liq/mc)         if mc>0 else 0.0
 
-    # ── Recycled / old ATH risk filter ──
-    # Dexscreener API không có ATH trực tiếp ổn định.
-    # Dùng proxy: token đã lâu, MC hiện thấp, volume/price yếu => khả năng từng pump cao rồi dump về.
-    recycled_risk = 0.0
-    setup_quality = "fresh"
-    if age_days >= 45: recycled_risk += 2.0
-    if age_days >= 90: recycled_risk += 1.5
-    if age_days >= 180: recycled_risk += 1.5
-    if mc < 800_000 and age_days >= 45: recycled_risk += 1.0
-    if vmc < 0.20 and age_days >= 45: recycled_risk += 1.5
-    if vol24 < 25_000 and age_days >= 45: recycled_risk += 1.0
-    if p24h <= 0 and p6h <= 5 and age_days >= 45: recycled_risk += 1.0
-    if bs24 < 1.8 and age_days >= 45: recycled_risk += 0.8
-    recycled_risk = round(min(10.0, recycled_risk), 1)
-    if recycled_risk >= 7:
-        setup_quality = "old_ath_high_risk"
-    elif recycled_risk >= 4:
-        setup_quality = "recycled_watch_only"
+    # ── FLAT BASE DETECTION (8–12h accumulation pattern) ──
+    # Logic: giá đi ngang (p6h thấp) + vol thấp trong 6h + 1h bắt đầu bứt
+    # Đây là pattern WORLDCUP, AEON trước khi pump
+    flat_base = False
+    flat_base_score = 0.0
+    flat_base_hours = 0
 
-    # AEON/WORLDCUP 2-TIER SETUP
-    # WATCH: sideway vùng thấp 100K-180K/350K, chưa mua vội.
-    # BUY ALERT: breakout đầu 180K-500K, trước khi pump chính/FOMO.
-    early_watch = (
-        90_000 <= mc <= 350_000
-        and recycled_risk < 4
-        and age_days >= 1
-        and -15 <= p24h <= 35
-        and -12 <= p6h <= 30
-        and -7 <= p1h <= 15
-        and va >= 1.10
-        and bs24 >= 1.20
-        and vmc >= 0.04
-        and liq >= 25_000
-    )
-    early_buy = (
-        180_000 <= mc <= 500_000
-        and recycled_risk < 4
-        and age_days >= 1
-        and 6 <= p1h <= 55
-        and -5 <= p6h <= 90
-        and 0 <= p24h <= 110
-        and va >= 1.45
-        and bs1h >= 1.4
-        and bs24 >= 1.25
-        and vmc >= 0.07
-        and liq >= 25_000
-    )
-    early_setup = early_watch or early_buy
+    # Điều kiện flat: giá 6h thay đổi ít + vol 6h thấp so với vol 24h
+    price_flat_6h  = abs(p6h) < 15          # giá 6h gần như đứng yên
+    price_flat_24h = abs(p24h) < 40         # giá 24h không pump mạnh
+    vol_quiet_6h   = (vol6 / max(vol24,1)) < 0.35  # vol 6h chỉ <35% vol 24h = đang lặng
+    vol_spike_1h   = va > 1.8               # 1h vol bắt đầu tăng = sắp breakout
 
-    if mc<500_000:     total+=2;   signals.append("🎯 Micro cap <$500K — room 10x+")
-    elif mc<2_000_000: total+=1.5; signals.append("📊 Small cap $500K–$2M")
-    elif mc<5_000_000: total+=1;   signals.append("📈 Mid cap $2M–$5M")
+    if price_flat_6h and price_flat_24h and vol_quiet_6h:
+        flat_base = True
+        flat_base_hours = 12  # estimate ~12h dựa trên data có
+        flat_base_score += 2.5
+        if vol_spike_1h:
+            flat_base_score += 2.0  # breakout đang bắt đầu!
+            flat_base_hours = 8     # nếu vol đang tăng = đã tích lũy ~8h rồi
+    elif abs(p6h) < 25 and (vol6 / max(vol24,1)) < 0.45 and bs24 > 1.5:
+        flat_base = True
+        flat_base_hours = 6
+        flat_base_score += 1.5
+        if vol_spike_1h:
+            flat_base_score += 1.5
 
-    if early_buy:
-        total += 4.0
-        signals.append("🚀 BUY ALERT: breakout đầu 180K-500K, vol/buy tăng tốc trước pump chính")
-    elif early_watch:
-        total += 2.0
-        signals.append("👁 WATCH: sideway MC thấp 100K-350K, volume/buy bắt đầu nhích lên")
+    # ── FLAT BASE BONUS (ưu tiên cao nhất) ──
+    if flat_base and vol_spike_1h:
+        total += flat_base_score
+        signals.append(f"🏆 FLAT BASE BREAKOUT: {flat_base_hours}h tích lũy + vol bùng nổ NOW")
+    elif flat_base:
+        total += flat_base_score * 0.7
+        signals.append(f"📦 FLAT BASE: {flat_base_hours}h tích lũy sideways — chờ breakout")
+
+    if mc < 100_000:
+        total+=3;   signals.append("🚨 ULTRA MICRO <$100K — 100x room nếu narrative catch")
+    elif mc < 200_000:
+        total+=2.5; signals.append("🎯 Micro cap <$200K — sweet spot 20-50x")
+    elif mc < 500_000:
+        total+=2;   signals.append("🎯 Micro cap <$500K — room 10x+")
+    elif mc < 2_000_000:
+        total+=1.5; signals.append("📊 Small cap $500K–$2M")
+    elif mc < 5_000_000:
+        total+=1;   signals.append("📈 Mid cap $2M–$5M")
 
     if va>3:    total+=2.5; signals.append(f"⚡ Vol tăng {va:.1f}x — tiền đột biến")
     elif va>1.5:total+=1.5; signals.append(f"📊 Vol picking up {va:.1f}x")
@@ -513,29 +468,15 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
     elif 10<p24h<100: total+=1;   signals.append(f"📈 +{p24h:.0f}% — nhẹ, chưa FOMO")
     elif -20<p24h<0:  total+=0.5; signals.append(f"📉 Dip {p24h:.0f}% — buy zone")
     if 15<p1h<100 and p24h<200:
-        total+=1.0; signals.append(f"🚀 1h bứt phá +{p1h:.0f}%")
+        total+=1.5; signals.append(f"🚀 1h bứt phá +{p1h:.0f}%")
 
-    # Không FOMO sau khi đã pump. Mục tiêu là alert trước pump như AEON ngày 11/5.
-    if p1h > 35:
-        total -= 2.0; warnings.append("⚠️ 1h đã pump mạnh — hạn chế FOMO")
-    if p6h > 80:
-        total -= 2.0; warnings.append("⚠️ 6h đã pump mạnh — dễ trễ entry")
-    if p24h > 120:
-        total -= 3.0; warnings.append("🚨 24h đã pump mạnh — bỏ qua/đợi retest")
-
-    if liq<30_000:   warnings.append("⚠️ Liq thấp <$30K")
+    if liq<30_000:   warnings.append("⚠️ Liq thấp <$30K — rug risk cao")
     if lmc<0.05:     warnings.append("⚠️ Liq/MC <5%")
-    if age_days<0.5: warnings.append("⚠️ Token <12h — cực rủi ro")
+    if age_days<0.5: warnings.append("⚠️ Token <12h — cực kỳ rủi ro")
+    if age_days<0.08:warnings.append("🚨 Token <2h — CASINO, không phải gem")
     if bs24<0.8:     warnings.append("🚨 Sells>Buys — phân phối")
     if p24h>300:     warnings.append("🚨 Đã pump >300%")
-
-    # Phạt mạnh token cũ từng có dấu hiệu ATH cao/dead chart, không cho lên top pre-pump.
-    if recycled_risk >= 7:
-        total -= 4.5
-        warnings.append("🚫 Token cũ/ATH cao trước đó — không ưu tiên top pre-pump")
-    elif recycled_risk >= 4:
-        total -= 2.0
-        warnings.append("⚠️ Recycled chart risk — chỉ watch, không ưu tiên BUY")
+    if mc<150_000 and liq<20_000: warnings.append("🚨 MC thấp + Liq thấp = rug risk rất cao")
 
     total = min(10.0, max(0.0, round(total,1)))
     rug=4.0
@@ -547,25 +488,22 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
     if liq>150_000:rug-=1.5
     rug=min(10.0,max(1.0,round(rug,1)))
 
-    if p24h>200 or p6h>180 or mc>10_000_000:
-        phase="euphoric"
-    elif p24h>80 or p6h>100 or mc>3_000_000:
-        phase="expansion"
-    elif early_setup or (vmc>0.3 and bs24>1.5):
-        phase="accumulation"
-    elif p24h<-30:
-        phase="distribution"
-    elif mc<500_000:
-        phase="stealth"
-    else:
-        phase="accumulation"
+    if p24h>200 or mc>10_000_000:            phase="euphoric"
+    elif flat_base and vol_spike_1h:         phase="accumulation"  # flat base breakout
+    elif p24h>50 or mc>3_000_000:            phase="expansion"
+    elif flat_base:                          phase="accumulation"  # đang tích lũy
+    elif vmc>0.3 and bs24>1.5:               phase="accumulation"
+    elif p24h<-30:                            phase="distribution"
+    elif mc<500_000:                          phase="stealth"
+    else:                                    phase="accumulation"
 
     tp = calc_trade_plan({
         "mc":mc,"liq":liq,"price":float(pair.get("priceUsd") or 0),
         "bs24":bs24,"bs1h":bs1h,"vol_accel":va,
         "p1h":p1h,"p24h":p24h,"vol_mc_ratio":vmc,
         "liq_mc_ratio":lmc,"age_days":age_days,
-        "score":total,"rug_risk":rug,"phase":phase,"chain":chain,"early_setup":early_setup,"early_watch":early_watch,"early_buy":early_buy,"recycled_risk":recycled_risk,"setup_quality":setup_quality,
+        "score":total,"rug_risk":rug,"phase":phase,"chain":chain,
+        "flat_base":flat_base,"vol_spike_1h":vol_spike_1h,
     })
 
     addr  = base.get("address","")
@@ -589,6 +527,7 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
         has_website=bool((pair.get("info") or {}).get("websites")),
         has_socials=bool((pair.get("info") or {}).get("socials")),
         pre_pump_score=total,rug_risk=rug,phase=phase,
+        flat_base=flat_base,flat_base_hours=flat_base_hours,
         signals=signals,warnings=warnings,
         accumulation_level=tp["accumulation_level"],
         entry_now=tp["entry_now"],
@@ -615,18 +554,38 @@ def score_gem(pair: dict, boost_map: dict) -> Optional[Gem]:
         position_size=tp["position_size"],
         trade_verdict=tp["trade_verdict"],
         aeon_comparable=tp["aeon_comparable"],
-        recycled_risk=recycled_risk,
-        setup_quality=setup_quality,
     )
 
 
 def hunt_sync(chains: list) -> list:
     all_pairs=[]; boost_map={}
+
+    # ── 1. Boost map ──
     data = dex_get("/token-boosts/top/v1")
     if isinstance(data,list):
         for b in data:
             if b.get("tokenAddress"): boost_map[b["tokenAddress"]]=b
 
+    # ── 2. NEW PAIRS — bắt token mới nhất trước khi ai biết ──
+    # Endpoint này trả về pairs mới tạo trong 24h, MC có thể chỉ $50-200K
+    for chain in chains:
+        data = dex_get(f"/latest/dex/pairs/{chain}")
+        if isinstance(data, dict):
+            new_pairs = data.get("pairs", [])
+        elif isinstance(data, list):
+            new_pairs = data
+        else:
+            new_pairs = []
+        # Filter: liq đủ để không phải dust, MC nhỏ = early
+        early = [p for p in new_pairs
+                 if (p.get("liquidity") or {}).get("usd", 0) >= 10_000
+                 and (p.get("fdv") or p.get("marketCap") or 0) <= 2_000_000
+                 and (p.get("fdv") or p.get("marketCap") or 0) >= 20_000]
+        all_pairs.extend(early[:20])
+        logger.info(f"New pairs {chain}: {len(new_pairs)} total → {len(early)} early gems")
+        time.sleep(0.2)
+
+    # ── 3. Token profiles (boosted) ──
     profiles = dex_get("/token-profiles/latest/v1")
     if isinstance(profiles,list):
         by_chain={}
@@ -636,17 +595,31 @@ def hunt_sync(chains: list) -> list:
         for chain,addrs in by_chain.items():
             data=dex_get(f"/tokens/v1/{chain}/{','.join(addrs[:25])}")
             pairs=data if isinstance(data,list) else (data or {}).get("pairs",[])
-            all_pairs.extend(pairs or []); time.sleep(0.3)
+            all_pairs.extend(pairs or []); time.sleep(0.2)
 
-    for q in ["new","ai","dog","cat","inu","moon","baby"][:5]:
+    # ── 4. Search keywords — tìm hidden micro caps ──
+    for q in ["new","pump","ai","dog","cat","inu","moon","pepe","based"][:6]:
         data=dex_get(f"/latest/dex/search?q={q}")
         pairs=(data or {}).get("pairs",[])
+        # Ưu tiên micro cap $50K-$500K
         micro=[p for p in pairs
-               if (p.get("marketCap") or p.get("fdv") or 0)<3_000_000
-               and (p.get("liquidity") or {}).get("usd",0)>15_000]
-        all_pairs.extend(micro[:8]); time.sleep(0.3)
+               if 20_000 <= (p.get("fdv") or p.get("marketCap") or 0) <= 2_000_000
+               and (p.get("liquidity") or {}).get("usd",0) >= 10_000]
+        all_pairs.extend(micro[:10]); time.sleep(0.2)
+
+    # ── 5. GMGN new tokens (bắt $50-300K MC sớm nhất) ──
+    gmgn_tokens = []
+    if GMGN_AVAILABLE:
+        try:
+            gmgn_raw = hunt_gmgn_new_tokens([c for c in chains if c in ("solana","ethereum","base")])
+            gmgn_tokens = gmgn_raw
+            logger.info(f"GMGN: {len(gmgn_tokens)} tokens fetched")
+        except Exception as e:
+            logger.warning(f"GMGN hunt failed: {e}")
 
     seen=set(); gems=[]
+
+    # Score từ Dexscreener pairs
     for pair in all_pairs:
         if not isinstance(pair,dict): continue
         addr=(pair.get("baseToken") or {}).get("address","")
@@ -657,9 +630,46 @@ def hunt_sync(chains: list) -> list:
         gem=score_gem(pair,boost_map)
         if gem and gem.pre_pump_score>=3.0: gems.append(gem)
 
+    # Score từ GMGN tokens
+    for gt in gmgn_tokens:
+        addr  = gt.get("address","")
+        chain = gt.get("chain","solana")
+        key   = addr+chain
+        if key in seen or not addr: continue
+        seen.add(key)
+
+        # Convert GMGN token sang fake "pair" để score_gem xử lý
+        fake_pair = {
+            "baseToken": {"address": addr, "symbol": gt.get("ticker","???"), "name": gt.get("name","")},
+            "chainId": chain,
+            "pairAddress": addr,
+            "dexId": "gmgn",
+            "priceUsd": str(gt.get("price",0)),
+            "fdv": gt.get("mc",0),
+            "marketCap": gt.get("mc",0),
+            "liquidity": {"usd": gt.get("liq",0)},
+            "volume": {"h24": gt.get("vol24",0), "h6": gt.get("vol6",0), "h1": gt.get("vol1",0)},
+            "priceChange": {"h1": gt.get("p1h",0), "h6": gt.get("p6h",0), "h24": gt.get("p24h",0), "m5": 0},
+            "txns": {"h24": {"buys": gt.get("buys24",0), "sells": gt.get("sells24",0)},
+                     "h1":  {"buys": 0, "sells": 0}},
+            "pairCreatedAt": (time.time() - gt.get("age_days",1)*86400) * 1000,
+            "url": gt.get("dex_url",""),
+            "info": {},
+        }
+        gem = score_gem(fake_pair, boost_map)
+        if gem and gem.pre_pump_score >= 2.5:
+            # Enrich với GMGN-specific data
+            if gt.get("trending_1m"):
+                gem.signals.insert(0, "🔥 GMGN Trending 1m — momentum đang tăng")
+                gem.pre_pump_score = min(10, gem.pre_pump_score + 1.0)
+            if gt.get("pumping_5m"):
+                gem.signals.insert(0, "⚡ GMGN Pump 5m — sắp breakout")
+                gem.pre_pump_score = min(10, gem.pre_pump_score + 0.5)
+            gems.append(gem)
+
     gems.sort(key=lambda g:g.pre_pump_score,reverse=True)
-    logger.info(f"Hunt done: {len(all_pairs)} pairs -> {len(gems)} gems")
-    return gems[:50]
+    logger.info(f"Hunt done: {len(all_pairs)} dex pairs + {len(gmgn_tokens)} gmgn tokens -> {len(gems)} gems")
+    return gems[:60]
 
 async def hunt(session, chains):
     import asyncio

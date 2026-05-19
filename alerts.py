@@ -35,67 +35,8 @@ def success_emoji(pct):
     if pct>=50: return "🟡"
     return "🔴"
 
-def score_label(score):
-    if score >= 9.5:
-        return "🚨 ULTRA GEM"
-    elif score >= 8:
-        return "🚀 BUY ALERT"
-    elif score >= 6:
-        return "⚡ WATCH STRONG"
-    elif score >= 4:
-        return "👀 WATCH"
-    return "🔍 SCAN"
-
-def get_alert_tier(gem):
-    score = float(getattr(gem, "pre_pump_score", 0) or 0)
-    mc = float(getattr(gem, "mc", 0) or 0)
-    verdict = str(getattr(gem, "trade_verdict", "") or "").upper()
-
-    if mc > 1_000_000 and "BUY" in verdict:
-        return "LATE"
-    if score >= 9.5:
-        return "ULTRA"
-    if "BUY ALERT" in verdict or score >= 8:
-        return "BUY"
-    if score >= 6:
-        return "WATCH_STRONG"
-    if score >= 4:
-        return "WATCH"
-    return "WATCH"
-
-
-def tier_header(tier):
-    if tier == "ULTRA":
-        return "🚨🚨🚨 PARABOLIC GEM DETECTED"
-    if tier == "BUY":
-        return "🚀🚀🚀 BUY ALERT — EARLY GEM"
-    if tier == "WATCH_STRONG":
-        return "⚡ ACCUMULATION DETECTED"
-    if tier == "LATE":
-        return "⚠️ LATE MOMENTUM — NO CHASE"
-    return "👀 EARLY WATCH"
-
-
-def momentum_label(gem):
-    if gem.pre_pump_score >= 9.5:
-        return "PARABOLIC"
-    if gem.pre_pump_score >= 8:
-        return "BUILDING FAST"
-    if gem.pre_pump_score >= 6:
-        return "BUILDING"
-    return "EARLY"
-
-
-def phase_bar(tier):
-    if tier == "ULTRA": return "[ BREAKOUT ██████ ]"
-    if tier == "BUY": return "[ BREAKOUT █████░ ]"
-    if tier == "WATCH_STRONG": return "[ ACCUMULATION █████░ ]"
-    if tier == "LATE": return "[ LATE/FOMO ██████ ]"
-    return "[ ACCUMULATION ███░░░ ]"
-
 
 def build_alert(gem, rank=1):
-    tier = get_alert_tier(gem)
     ce  = CHAIN_EMOJI.get(gem.chain,"⬡")
     pi  = PHASE_ICON.get(gem.phase,"❓")
     ai  = ACCUM_ICON.get(gem.accumulation_level,"❓")
@@ -104,131 +45,138 @@ def build_alert(gem, rank=1):
     re  = "🟢" if gem.rug_risk<=4 else "🟡" if gem.rug_risk<=6 else "🔴"
     bse = "🐋" if gem.bs_ratio24>=3 else "✅" if gem.bs_ratio24>=2 else "📊" if gem.bs_ratio24>=1 else "🚨"
 
-    entry_low  = getattr(gem,'entry_mc_low',0) or gem.mc*0.95
-    entry_high = getattr(gem,'entry_mc_high',0) or gem.mc*1.10
-
     lines = [
-        f"{'═'*36}",
-        f"{tier_header(tier)}",
-        f"{'═'*36}",
-        "",
-        f"💎 GEM #{rank}  |  ${gem.ticker}",
-        f"{ce} {gem.chain.upper()}  |  {pi} {gem.phase.upper()}",
+        f"{'='*36}",
+        f"💎 GEM #{rank}  {gem.trade_verdict}",
+        f"{'='*36}",
+        f"",
+        f"${gem.ticker}  {ce}{gem.chain.upper()}  {pi}{gem.phase.upper()}",
         f"📛 {gem.name}",
-        "",
-        f"💰 MC: {fmt_usd(gem.mc)}  |  Liq: {fmt_usd(gem.liq)}",
-       f"🔥 SCORE: {gem.pre_pump_score}/10 {score_label(gem.pre_pump_score)} {bar(gem.pre_pump_score)}",
-
-        f"♻️ Old ATH Risk: {getattr(gem, 'recycled_risk', 0)}/10",
-        f"{re} Rug Risk: {gem.rug_risk}/10   {bar(gem.rug_risk)}",
-        "",
-    ]
-
-    if tier in ("BUY", "ULTRA"):
-        lines += [
-            "📈 BREAKOUT DETECTED",
-            f"• Sideway accumulation: YES",
-            f"• Volume explosion: {gem.vol_accel}x",
-            f"• Buyers dominance 24h: {gem.bs_ratio24}x  ({gem.buys24}/{gem.sells24})",
-            f"• Buyers dominance 1h: {gem.bs_ratio1h}x",
-            f"• Smart money flow: {'VERY STRONG' if tier == 'ULTRA' else 'STRONG'}",
-            "",
-            "🎯 ENTRY ZONE",
-            f"NOW: {fmt_usd(entry_low)} — {fmt_usd(entry_high)} MC",
-            f"DCA: {getattr(gem, 'dca_plan', 'N/A')}",
-            f"Size: {gem.position_size}",
-            "",
-        ]
-    elif tier == "WATCH_STRONG":
-        lines += [
-            "👀 STRONG WATCH",
-            "• Sideway phase detected",
-            f"• Volume increasing: {gem.vol_accel}x",
-            f"• Buy pressure: {gem.bs_ratio24}x",
-            "• Waiting breakout confirmation...",
-            "",
-            "🎯 BREAKOUT TRIGGER",
-            f"BUY nếu MC vượt vùng {fmt_usd(max(gem.mc*1.10, 180000))} — {fmt_usd(max(gem.mc*1.35, 250000))}",
-            "",
-        ]
-    elif tier == "LATE":
-        lines += [
-            "⚠️ TOKEN ĐÃ CHẠY XA",
-            "• Không chase nếu entry đã qua vùng sớm",
-            "• Chỉ canh pullback / retest",
-            f"• Current MC: {fmt_usd(gem.mc)}",
-            "",
-        ]
-    else:
-        lines += [
-            "👀 EARLY WATCH",
-            "• Setup còn sớm",
-            f"• Volume accel: {gem.vol_accel}x",
-            f"• Buy pressure: {gem.bs_ratio24}x",
-            "• Chờ breakout rõ hơn",
-            "",
-        ]
-
-    lines += [
-        f"🔥 MOMENTUM: {momentum_label(gem)}",
-        "⏳ ESTIMATED PHASE:",
-        phase_bar(tier),
-        "",
-        f"{'─'*36}",
-        "📊 METRICS",
-        f"MC: {fmt_usd(gem.mc)}  |  Age: {gem.age_days}d",
-        f"Liq: {fmt_usd(gem.liq)}  |  DEX: {gem.dex_id}",
-        f"Vol24: {fmt_usd(gem.vol24)}  |  Vol1h: {fmt_usd(gem.vol1)}",
-        f"1h:{fmt_pct(gem.p1h)}  6h:{fmt_pct(gem.p6h)}  24h:{fmt_pct(gem.p24h)}",
-        "",
-        f"{'─'*36}",
-        "💎 TARGETS",
-        f"{success_emoji(gem.success_rate_tp1)} {gem.target1}",
-        f"{success_emoji(gem.success_rate_tp2)} {gem.target2}",
-        f"{success_emoji(gem.success_rate_tp3)} {gem.target3}",
-        f"🌙 {gem.peak_estimate}",
-        "",
-        f"STOP: {gem.stop_loss}",
-        f"R/R: {gem.risk_reward}",
-        f"Hold: {gem.hold_period}",
-        "",
+        f"",
+        *(
+            [f"🏆 FLAT BASE BREAKOUT — {getattr(gem,'flat_base_hours',0)}h tích lũy!",f""]
+            if getattr(gem,'flat_base',False) else []
+        ),
+        f"🤖 {se} Pre-Pump: {gem.pre_pump_score}/10  {bar(gem.pre_pump_score)}",
+        f"   {re} Rug Risk: {gem.rug_risk}/10   {bar(gem.rug_risk)}",
+        f"",
         f"🐋 SM/WHALE ACCUMULATION",
-        f"{ai} {al}",
-        f"B/S 24h: {bse} {gem.bs_ratio24}x  ({gem.buys24}/{gem.sells24})",
-        f"Vol Accel: {gem.vol_accel}x  |  VOL/MC: {gem.vol_mc_ratio}x",
-        "",
+        f"  {ai} {al}",
+        f"  B/S 24h: {bse} {gem.bs_ratio24}x  ({gem.buys24} / {gem.sells24})",
+        f"  B/S  1h: {gem.bs_ratio1h}x",
+        f"  Vol Accel: {gem.vol_accel}x  |  VOL/MC: {gem.vol_mc_ratio}x",
+        f"",
+        f"{'─'*36}",
+        f"📊 METRICS",
+        f"  MC:    {fmt_usd(gem.mc)}  |  Age: {gem.age_days}d",
+        f"  Liq:   {fmt_usd(gem.liq)}  |  DEX: {gem.dex_id}",
+        f"  Vol24: {fmt_usd(gem.vol24)}  |  Vol1h: {fmt_usd(gem.vol1)}",
+        f"  1h:{fmt_pct(gem.p1h)}  6h:{fmt_pct(gem.p6h)}  24h:{fmt_pct(gem.p24h)}",
+        f"",
+        f"{'─'*36}",
+        f"📈 TRADE PLAN",
+        f"",
+        f"  ENTRY:  {gem.entry_zone}",
+        f"  MC Zone: {fmt_usd(getattr(gem,'entry_mc_low',0) or gem.mc*0.95)} — {fmt_usd(getattr(gem,'entry_mc_high',0) or gem.mc*1.08)}",
+        f"  DCA:    {getattr(gem, 'dca_plan', 'N/A')}",
+        f"  Size:   {gem.position_size}",
+        f"",
+        f"  TARGETS (xác suất đạt):",
+        f"  {success_emoji(gem.success_rate_tp1)} {gem.target1}",
+        f"     Xác suất: {gem.success_rate_tp1}% token đạt TP1",
+        f"",
+        f"  {success_emoji(gem.success_rate_tp2)} {gem.target2}",
+        f"     Xác suất: {gem.success_rate_tp2}% token đạt TP2",
+        f"",
+        f"  {success_emoji(gem.success_rate_tp3)} {gem.target3}",
+        f"     Xác suất: {gem.success_rate_tp3}% token đạt TP3",
+        f"",
+        f"  🌙 {gem.peak_estimate}",
+        f"",
+        f"  STOP:   {gem.stop_loss}",
+        f"  R/R:    {gem.risk_reward}",
+        f"  Hold:   {gem.hold_period}",
+        f"",
+        f"  Median peak (historical): {gem.median_peak_x}x",
+        f"  Best case (p75):          {gem.best_case_x}x",
     ]
 
     if gem.aeon_comparable:
-        lines += [f"🔥 {gem.aeon_comparable}", ""]
+        lines += [f"", f"  🔥 {gem.aeon_comparable}"]
+
+    lines += [
+        f"",
+    ]
+
+    # GMGN Security block
+    gmgn_sigs  = getattr(gem,"gmgn_signals",[])
+    gmgn_warns = getattr(gem,"gmgn_warnings",[])
+    gmgn_rug   = getattr(gem,"gmgn_rug_score",0)
+    gmgn_ins   = getattr(gem,"gmgn_insider_pct",0)
+    gmgn_dev   = getattr(gem,"gmgn_dev_pct",0)
+    gmgn_snp   = getattr(gem,"gmgn_sniper_count",0)
+    gmgn_sm    = getattr(gem,"gmgn_sm_wallets",0)
+    gmgn_kol   = getattr(gem,"gmgn_kol_count",0)
+    gmgn_lp    = getattr(gem,"gmgn_lp_burned",False)
+    gmgn_rnc   = getattr(gem,"gmgn_renounced",False)
+    gmgn_honey = getattr(gem,"gmgn_honeypot",False)
+
+    if gmgn_rug > 0 or gmgn_sm > 0 or gmgn_ins > 0:
+        lines += [
+            f"{'─'*36}",
+            f"🔐 GMGN SECURITY",
+            f"  🍯 Honeypot:  {'🚨 YES' if gmgn_honey else '✅ No'}",
+            f"  🔒 LP Burned: {'✅ Yes' if gmgn_lp else '❌ No'}",
+            f"  📜 Renounced: {'✅ Yes' if gmgn_rnc else '❌ No'}",
+            f"  👤 Insider:   {gmgn_ins:.0f}%  {'🚨' if gmgn_ins>30 else '✅' if gmgn_ins<5 else '⚠️'}",
+            f"  👨‍💻 Dev hold:  {gmgn_dev:.0f}%  {'✅' if gmgn_dev==0 else '⚠️'}",
+            f"  🎯 Snipers:   {gmgn_snp}  {'⚠️' if gmgn_snp>20 else '✅'}",
+            f"",
+        ]
+        if gmgn_sm > 0 or gmgn_kol > 0:
+            lines += [
+                f"💰 SMART MONEY (GMGN)",
+                f"  🐋 SM Wallets: {gmgn_sm}  {'🔥' if gmgn_sm>=3 else '👀' if gmgn_sm>0 else '—'}",
+                f"  ⭐ KOL Wallets: {gmgn_kol}  {'🔥' if gmgn_kol>=2 else '👀' if gmgn_kol>0 else '—'}",
+                f"",
+            ]
+        if gmgn_sigs:
+            for s in gmgn_sigs[:3]:
+                lines.append(f"  {s}")
+            lines.append("")
+        if gmgn_warns:
+            for w in gmgn_warns[:3]:
+                lines.append(f"  {w}")
+            lines.append("")
 
     if gem.signals:
         lines.append("✅ SIGNALS")
-        for s in gem.signals[:5]:
-            lines.append(f"• {s}")
+        for s in gem.signals[:4]:
+            lines.append(f"  {s}")
         lines.append("")
 
     if gem.warnings:
         lines.append("⚠️ WARNINGS")
-        for w in gem.warnings[:4]:
-            lines.append(f"• {w}")
+        for w in gem.warnings:
+            lines.append(f"  {w}")
         lines.append("")
 
     lines += [
         f"{'─'*36}",
-        f"🔗 DexScreener:\n{gem.dex_url}",
+        f"🔗 {gem.dex_url}",
     ]
     if gem.chain == "solana":
-        lines.append(f"🦅 Birdeye:\nhttps://birdeye.so/token/{gem.address}")
+        lines.append(f"🦅 https://birdeye.so/token/{gem.address}")
     elif gem.chain in ("ethereum","base"):
-        lines.append(f"🔍 Explorer:\nhttps://etherscan.io/token/{gem.address}")
+        lines.append(f"🔍 https://etherscan.io/token/{gem.address}")
 
     lines += [
         f"📋 {gem.address}",
-        "",
-        "⚠️ DYOR | Not financial advice | High risk",
+        f"",
+        f"⚠️ DYOR | Not financial advice | High risk",
     ]
     return "\n".join(lines)
+
 
 def build_summary(gems, scan_num, total):
     if not gems:
@@ -244,13 +192,13 @@ def build_summary(gems, scan_num, total):
         lines += [
             f"",
             f"{i}. {se} ${g.ticker} {g.chain.upper()} | {g.pre_pump_score}/10",
-            f"   MC:{fmt_usd(g.mc)} | {ai}{g.accumulation_level.upper()} | ATH Risk:{getattr(g, 'recycled_risk', 0)}/10",
+            f"   MC:{fmt_usd(g.mc)} | {ai}{g.accumulation_level.upper()}",
             f"   B/S:{g.bs_ratio24}x | Vol↑:{g.vol_accel}x | {fmt_pct(g.p24h)}",
             f"   {g.trade_verdict}",
-            f"   🎯 TP1 MC {fmt_usd(g.target1_mc)} ({g.target1_days}) | "
-            f"TP2 MC {fmt_usd(g.target2_mc)} ({g.target2_days})",
-            f"   🎯 TP3 MC {fmt_usd(g.target3_mc)} ({g.target3_days}) | "
-            f"Peak MC {fmt_usd(g.mc * g.peak_x)} ({g.peak_days})",
+            f"   TP1:{g.target1_x}x({g.target1_days}) "
+            f"TP2:{g.target2_x}x({g.target2_days}) "
+            f"TP3:{g.target3_x}x({g.target3_days})",
+            f"   Peak est: {g.peak_x}x ({g.peak_days})",
             f"   {g.dex_url}",
         ]
     lines += ["", f"Scanned: {total} pairs"]
