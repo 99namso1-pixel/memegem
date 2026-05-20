@@ -83,12 +83,6 @@ class Gem:
     gmgn_renounced:bool=False; gmgn_honeypot:bool=False
     gmgn_signals:list=field(default_factory=list)
     gmgn_warnings:list=field(default_factory=list)
-    # Dev Quality Score
-    dev_score:float=0.0
-    dev_verdict:str=""
-    hold_quality:str=""
-    dev_reasons:list=field(default_factory=list)
-    dev_warnings:list=field(default_factory=list)
     # Trade plan
     accumulation_level:str="none"
     entry_now:bool=False; entry_zone:str=""
