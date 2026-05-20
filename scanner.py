@@ -83,6 +83,12 @@ class Gem:
     gmgn_renounced:bool=False; gmgn_honeypot:bool=False
     gmgn_signals:list=field(default_factory=list)
     gmgn_warnings:list=field(default_factory=list)
+    # Dev Quality Score
+    dev_score:float=0.0
+    dev_verdict:str=""
+    hold_quality:str=""
+    dev_reasons:list=field(default_factory=list)
+    dev_warnings:list=field(default_factory=list)
     # Trade plan
     accumulation_level:str="none"
     entry_now:bool=False; entry_zone:str=""
@@ -421,6 +427,28 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     mature_token   = age_days >= 0.5             # token đủ tuổi
     good_liq       = liq >= 50_000               # liq tốt = có whale gom được
     vol_vs_liq     = vmc >= 0.2                  # vol đủ lớn so với MC (0.2 = $200K vol / $1M MC)
+
+    # Dead Vol Accumulation — AGENT pattern
+    # Vol cực thấp nhiều ngày + giá flat + liq tốt = whale hold, chờ catalyst
+    dead_vol_accum = (
+        age_days >= 2.0 and          # token đủ tuổi
+        abs(p24h) < 20 and           # giá không đi đâu
+        vmc < 0.15 and               # vol rất thấp so với MC
+        liq >= 50_000 and            # liq tốt = có whale
+        bs24 >= 1.0 and              # không bị bán nhiều
+        lmc >= 0.05                  # liq/MC ratio OK
+    )
+
+    if dead_vol_accum and not stealth_accum and not flat_base:
+        stealth_accum = True
+        stealth_score = 2.5          # base score
+        if liq >= 100_000: stealth_score += 1.0   # liq rất tốt
+        if age_days >= 3:  stealth_score += 0.5   # hold 3+ ngày
+        if age_days >= 5:  stealth_score += 0.5   # hold 5+ ngày = conviction
+        flat_base_hours = int(age_days * 24)       # estimate hours holding
+        signals.append(f"😴 DEAD VOL ACCUM: {int(age_days)}d vol flat — whale đang hold, chờ catalyst")
+        if liq >= 100_000:
+            signals.append(f"💧 Liq ${fmt_usd(liq)} với vol thấp = không ai bán = strong hands")
 
     # MANIFEST pattern: token 2d tuổi, vol24 cao, giá flat, bs > 1.3
     if (mature_token and price_suppress and whale_buying

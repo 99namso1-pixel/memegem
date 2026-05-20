@@ -15,9 +15,10 @@ from telegram import Bot
 from scanner         import hunt_sync
 from alerts          import send_gem_alerts, send_summary, send_message
 from twitter_monitor import TwitterMonitor, TOP_KOLS
-from wallet_monitor import WalletMonitor
 try:
-    from gmgn import analyze_token as gmgn_analyze, set_api_key as gmgn_set_key
+    from gmgn import (analyze_token as gmgn_analyze,
+                      set_api_key as gmgn_set_key,
+                      calc_dev_score, format_dev_score)
     GMGN_AVAILABLE = True
 except ImportError:
     GMGN_AVAILABLE = False
@@ -28,6 +29,16 @@ try:
     X_AVAILABLE = True
 except ImportError:
     X_AVAILABLE = False
+
+try:
+    from wallet_tracker import (
+        scan_wallet, add_wallet_to_watchlist, add_token_to_watchlist,
+        check_watchlist_breakouts, format_wallet_scan_alert, format_breakout_alert,
+        load_watchlist, save_watchlist
+    )
+    WALLET_TRACKER = True
+except ImportError:
+    WALLET_TRACKER = False
 
 load_dotenv()
 logging.basicConfig(
@@ -57,14 +68,9 @@ MAX_RUG    = float(os.getenv("MAX_RUG_RISK", "7.5"))     # chặt rug
 MIN_AGE_H  = float(os.getenv("MIN_AGE_HOURS", "0.5"))    # cho phép token 30min+
 X_ENABLED  = os.getenv("X_SOCIAL_ENABLED", "true").lower() == "true"
 X_TOP_N    = int(os.getenv("X_SCAN_TOP_N", "3"))
-
-# Smart wallet monitor config
-WALLET_ENABLED  = os.getenv("WALLET_MONITOR_ENABLED", "true").lower() == "true"
-WALLET_ADDRESSES = [w.strip() for w in os.getenv("WALLET_ADDRESSES", "0xf703fd64093b50797abdc9e450632240fa2ba5d4").split(",") if w.strip()]
-WALLET_CHAINS   = [c.strip() for c in os.getenv("WALLET_CHAINS", "base,ethereum,bsc").split(",") if c.strip()]
-WALLET_INTERVAL = int(os.getenv("WALLET_CHECK_MINUTES", "2")) * 60
-WALLET_MIN_SCORE = float(os.getenv("WALLET_MIN_SCORE", str(MIN_SCORE)))
-ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "")
+# Wallet tracker config
+TRACKED_WALLETS = [w.strip() for w in os.getenv("TRACKED_WALLETS", "").split(",") if w.strip()]
+WALLET_SCAN_INTERVAL = int(os.getenv("WALLET_SCAN_MINUTES", "30")) * 60
 
 # Twitter config
 TW_ENABLED  = os.getenv("TWITTER_ENABLED", "true").lower() == "true"
@@ -90,14 +96,30 @@ def cleanup_seen(seen, ttl_hours=6):
 def apply_filters(gems):
     out = []
     for g in gems:
-        if g.pre_pump_score < MIN_SCORE:                  continue
+        # Chain-specific thresholds
+        if g.chain == "solana":
+            min_liq   = 10_000   # SOL liq thấp hơn
+            min_score = MIN_SCORE - 0.5
+            max_rug   = MAX_RUG + 0.5
+            min_bs    = 1.0      # SOL pump nhanh, bs ratio thấp hơn cũng ok
+        elif g.chain == "base":
+            min_liq   = MIN_LIQ  # BASE giữ nguyên
+            min_score = MIN_SCORE
+            max_rug   = MAX_RUG
+            min_bs    = MIN_BS
+        else:  # ethereum
+            min_liq   = 20_000
+            min_score = MIN_SCORE
+            max_rug   = MAX_RUG
+            min_bs    = MIN_BS
+
+        if g.pre_pump_score < min_score:                  continue
         if g.mc < MIN_MC or g.mc > MAX_MC:                continue
-        if g.liq < MIN_LIQ:                                continue
-        if g.bs_ratio24 < MIN_BS:                          continue
+        if g.liq < min_liq:                                continue
+        if g.bs_ratio24 < min_bs:                          continue
         if g.vol_accel  < MIN_VA:                          continue
-        if g.rug_risk   > MAX_RUG:                         continue
+        if g.rug_risk   > max_rug:                         continue
         if g.phase in ("euphoric","dead","distribution"):  continue
-        # Age filter: breakout_candle bypass age (không muốn bỏ lỡ TSG-class)
         if g.age_days < (MIN_AGE_H/24) and not g.breakout_candle:
             continue
         out.append(g)
@@ -141,6 +163,13 @@ async def gem_scanner_loop(bot: Bot, seen: dict):
                         gem.gmgn_honeypot     = gd.is_honeypot
                         gem.gmgn_signals      = gd.signals
                         gem.gmgn_warnings     = gd.warnings
+                        # Tính Dev Quality Score
+                        ds = calc_dev_score(gd)
+                        gem.dev_score    = ds.onchain_score
+                        gem.dev_verdict  = ds.dev_verdict
+                        gem.hold_quality = ds.hold_quality
+                        gem.dev_reasons  = ds.reasons
+                        gem.dev_warnings = ds.warnings
                         # Honeypot = skip alert
                         if gd.is_honeypot:
                             new_gems = [g for g in new_gems if g.id != gem.id]
@@ -208,6 +237,49 @@ async def gem_scanner_loop(bot: Bot, seen: dict):
 # ─────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────
+async def initial_wallet_scan(bot: Bot, wallets: list):
+    """Scan tất cả wallets ngay khi bot start."""
+    if not WALLET_TRACKER: return
+    await asyncio.sleep(5)  # đợi bot connect xong
+    for wallet in wallets:
+        try:
+            await send_message(bot, CHAT_ID,
+                f"🔍 Đang scan wallet {wallet[:8]}...{wallet[-6:]}\n⏳ Quét tất cả tokens..."
+            )
+            loop   = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, scan_wallet, wallet, ["base","ethereum","solana"]
+            )
+            # Lưu tokens accumulating vào watchlist
+            for wt in result.accumulating:
+                add_token_to_watchlist(wt)
+
+            # Gửi summary
+            msg = format_wallet_scan_alert(result)
+            await send_message(bot, CHAT_ID, msg)
+            logger.info(f"Wallet scan done: {wallet[:8]} → {len(result.accumulating)} accumulating")
+        except Exception as e:
+            logger.error(f"Wallet scan error {wallet[:8]}: {e}")
+        await asyncio.sleep(2)
+
+
+async def wallet_breakout_loop(bot: Bot):
+    """Check breakouts cho tất cả tokens trong watchlist."""
+    if not WALLET_TRACKER: return
+    logger.info(f"Wallet breakout checker started (interval={WALLET_SCAN_INTERVAL}s)")
+    while True:
+        await asyncio.sleep(WALLET_SCAN_INTERVAL)
+        try:
+            loop    = asyncio.get_event_loop()
+            alerts  = await loop.run_in_executor(None, check_watchlist_breakouts)
+            for alert in alerts:
+                msg = format_breakout_alert(alert)
+                await send_message(bot, CHAT_ID, msg)
+                logger.info(f"🚨 Breakout: ${alert['ticker']} +{alert['mc_change']:.0f}%")
+        except Exception as e:
+            logger.error(f"Wallet breakout check: {e}")
+
+
 async def run():
     if not BOT_TOKEN or "xxx" in BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN chưa set trong .env"); return
@@ -225,13 +297,11 @@ async def run():
 
     # Startup message
     tw_status = f"✅ ON (check mỗi {TW_INTERVAL//60}p, min urgency: {TW_URGENCY})" if TW_ENABLED else "❌ OFF"
-    wallet_status = f"✅ ON ({len(WALLET_ADDRESSES)} ví, {WALLET_INTERVAL//60}p)" if WALLET_ENABLED else "❌ OFF"
     await send_message(bot, CHAT_ID,
         f"💎 GEM HUNTER v5 STARTED\n\n"
         f"🔭 Chains: {', '.join(CHAINS)}\n"
         f"⏱ Gem scan: mỗi {INTERVAL//60}p\n"
         f"🐦 Twitter KOL: {tw_status}\n"
-        f"👛 Smart Wallet: {wallet_status}\n"
         f"🎯 Min score: {MIN_SCORE}/10\n"
         f"💰 MC: ${MIN_MC/1000:.0f}K — ${MAX_MC/1_000_000:.1f}M\n"
         f"🐋 Min B/S: {MIN_BS}x | Vol↑: {MIN_VA}x\n\n"
@@ -241,7 +311,18 @@ async def run():
         f"  Tier 3: Ansem, Dingaling, Blknoiz..."
     )
 
-    # Khởi động 2 tasks song song
+    # Init tracked wallets
+    if WALLET_TRACKER and TRACKED_WALLETS:
+        for w in TRACKED_WALLETS:
+            add_wallet_to_watchlist(w, ["base","ethereum","solana"])
+        logger.info(f"Tracking {len(TRACKED_WALLETS)} wallets: {[w[:8] for w in TRACKED_WALLETS]}")
+        # Initial scan ngay khi start
+        asyncio.create_task(
+            initial_wallet_scan(bot, TRACKED_WALLETS),
+            name="wallet_init"
+        )
+
+    # Khởi động tasks song song
     tasks = [
         asyncio.create_task(
             gem_scanner_loop(bot, seen),
@@ -249,23 +330,12 @@ async def run():
         ),
     ]
 
-    if WALLET_ENABLED:
-        wallet_monitor = WalletMonitor(
-            bot=bot,
-            chat_id=CHAT_ID,
-            wallets=WALLET_ADDRESSES,
-            chains=WALLET_CHAINS,
-            check_interval=WALLET_INTERVAL,
-            min_score=WALLET_MIN_SCORE,
-            etherscan_api_key=ETHERSCAN_API_KEY,
-        )
-        tasks.append(
-            asyncio.create_task(
-                wallet_monitor.run_loop(),
-                name="wallet_monitor"
-            )
-        )
-        logger.info(f"Wallet monitor enabled: {len(WALLET_ADDRESSES)} wallets, interval={WALLET_INTERVAL}s")
+    # Wallet breakout checker
+    if WALLET_TRACKER and TRACKED_WALLETS:
+        tasks.append(asyncio.create_task(
+            wallet_breakout_loop(bot),
+            name="wallet_tracker"
+        ))
 
     if TW_ENABLED:
         twitter_monitor = TwitterMonitor(
@@ -298,11 +368,6 @@ async def run():
                     tasks = [t for t in pending]
                     tasks.append(asyncio.create_task(
                         gem_scanner_loop(bot, seen), name="gem_scanner"
-                    ))
-                elif name == "wallet_monitor" and WALLET_ENABLED:
-                    tasks = [t for t in pending]
-                    tasks.append(asyncio.create_task(
-                        wallet_monitor.run_loop(), name="wallet_monitor"
                     ))
                 elif name == "twitter_monitor" and TW_ENABLED:
                     tasks = [t for t in pending]
