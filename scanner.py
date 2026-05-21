@@ -337,7 +337,7 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     chain=(pair.get("chainId") or "").lower()
 
     # ── Hard filters ──
-    if mc > 20_000_000: return None
+    if mc > 15_000_000: return None
     if mc < 10_000:     return None
     if p24h > 900:      return None
     if p24h < -80:      return None
@@ -431,12 +431,12 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     # Dead Vol Accumulation — AGENT pattern
     # Vol cực thấp nhiều ngày + giá flat + liq tốt = whale hold, chờ catalyst
     dead_vol_accum = (
-        age_days >= 2.0 and          # token đủ tuổi
-        abs(p24h) < 20 and           # giá không đi đâu
-        vmc < 0.15 and               # vol rất thấp so với MC
-        liq >= 50_000 and            # liq tốt = có whale
-        bs24 >= 1.0 and              # không bị bán nhiều
-        lmc >= 0.05                  # liq/MC ratio OK
+        age_days >= 1.0 and          # token đủ tuổi (giảm từ 2d)
+        abs(p24h) < 30 and           # giá không bứt mạnh
+        vmc < 0.3 and                # vol thấp-trung bình
+        liq >= 30_000 and            # liq tốt
+        bs24 >= 1.0 and
+        lmc >= 0.03
     )
 
     if dead_vol_accum and not stealth_accum and not flat_base:
@@ -539,13 +539,19 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     elif lmc>=0.1:total+=1.0; signals.append(f"💧 Liq {lmc*100:.0f}% MC — OK")
     elif liq>=100_000: total+=0.5
 
-    # Age signal
-    if 0.08 <= age_days < 0.5:
-        total+=1.5; signals.append(f"🆕 Token {age_days*24:.0f}h — very early")
-    elif age_days < 2:
-        total+=1.0; signals.append(f"🆕 Token {age_days*24:.0f}h — early")
-    elif age_days < 7:
-        total+=0.5; signals.append(f"📅 Token {int(age_days)}d — early")
+    # Age scoring — ưu tiên 1-5 ngày (VIRL/MANIFEST/TOLYBOT pattern)
+    if 1.0 <= age_days <= 5.0:
+        total+=2.0; signals.append(f"🎯 Token {age_days:.1f}d — SWEET SPOT 1-5d, pump potential cao nhất")
+    elif 5.0 < age_days <= 14.0:
+        total+=1.0; signals.append(f"📅 Token {int(age_days)}d — mature, still ok")
+    elif 0.5 <= age_days < 1.0:
+        total+=0.0  # neutral — chưa đủ 1 ngày
+        signals.append(f"⏳ Token {age_days*24:.0f}h — chưa đủ 1d, chờ thêm")
+    elif age_days < 0.5:
+        total-=1.5  # penalize < 12h
+        warnings.append(f"⚠️ Token {age_days*24:.0f}h — quá mới, rủi ro cao")
+    elif age_days > 30:
+        total-=0.5  # token quá cũ mà MC vẫn thấp = suspect
 
     # Price action
     if 0<=p24h<=15:    total+=1.5; signals.append("😴 Giá flat — chưa ai biết")
@@ -778,10 +784,23 @@ def hunt_sync(chains:list) -> list:
         if data:
             pairs=(data.get("pairs",[]) if isinstance(data,dict) else [])
             gainers=[p for p in pairs
-                     if 5_000<=(p.get("fdv") or p.get("marketCap") or 0)<=5_000_000
+                     if 5_000<=(p.get("fdv") or p.get("marketCap") or 0)<=10_000_000
                      and (p.get("liquidity") or {}).get("usd",0)>=8_000]
-            all_pairs.extend(gainers[:20])
+            all_pairs.extend(gainers[:25])
             time.sleep(0.15)
+
+        # SOL top volume — bắt VIRL-class (token 6d+ đang có vol tăng)
+        for ep in ["/latest/dex/tokens/solana/trending",
+                   "/latest/dex/tokens/solana/top"]:
+            data=dex_get(ep)
+            if data:
+                pairs=(data.get("pairs",[]) if isinstance(data,dict) else [])
+                top_vol=[p for p in pairs
+                         if 100_000<=(p.get("fdv") or p.get("marketCap") or 0)<=10_000_000
+                         and (p.get("liquidity") or {}).get("usd",0)>=50_000
+                         and float((p.get("priceChange") or {}).get("h1",0) or 0)>5]
+                all_pairs.extend(top_vol[:20])
+                time.sleep(0.15)
 
     # 6. Keyword search — expanded để bắt TSG-class
     keywords=["new","pump","ai","dog","cat","inu","moon","pepe","based",
@@ -849,10 +868,19 @@ def hunt_sync(chains:list) -> list:
                 gem.pre_pump_score=min(10,gem.pre_pump_score+0.5)
             gems.append(gem)
 
-    # Sort: BASE > ETH > SOL, rồi breakout > flat_base > score
+    # Sort: BASE > ETH > SOL + age 1-5d ưu tiên + breakout + score
     chain_rank = {"base": 0, "ethereum": 1, "solana": 2}
+
+    def age_rank(g):
+        # 1-5d = 0 (tốt nhất), <1d = 1, 5-14d = 2, >14d = 3
+        if 1.0 <= g.age_days <= 5.0:  return 0
+        if 0.5 <= g.age_days < 1.0:   return 1
+        if 5.0 < g.age_days <= 14.0:  return 2
+        return 3
+
     gems.sort(key=lambda g:(
         chain_rank.get(g.chain, 3),                              # BASE trước
+        age_rank(g),                                             # 1-5d ưu tiên
         -(3 if g.breakout_candle else 1 if g.flat_base else 0),  # breakout
         -g.pre_pump_score,                                        # score cao
         g.mc,                                                     # MC nhỏ

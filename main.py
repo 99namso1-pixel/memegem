@@ -60,7 +60,7 @@ if GMGN_AVAILABLE and GMGN_KEY and gmgn_set_key:
 INTERVAL   = int(os.getenv("SCAN_INTERVAL_MINUTES", "5")) * 60
 MIN_SCORE  = float(os.getenv("MIN_SCORE", "5.5"))
 MIN_MC     = float(os.getenv("MIN_MC", "20000"))
-MAX_MC     = float(os.getenv("MAX_MC", "5000000"))
+MAX_MC     = float(os.getenv("MAX_MC", "10000000"))  # tăng lên 10M
 MIN_LIQ    = float(os.getenv("MIN_LIQUIDITY", "30000"))  # liq > $30K = ít rug
 MIN_BS     = float(os.getenv("MIN_BS_RATIO", "1.2"))
 MIN_VA     = float(os.getenv("MIN_VOL_ACCEL", "1.0"))
@@ -98,16 +98,16 @@ def apply_filters(gems):
     for g in gems:
         # Chain-specific thresholds
         if g.chain == "solana":
-            min_liq   = 10_000   # SOL liq thấp hơn
+            min_liq   = 10_000
             min_score = MIN_SCORE - 0.5
             max_rug   = MAX_RUG + 0.5
-            min_bs    = 1.0      # SOL pump nhanh, bs ratio thấp hơn cũng ok
+            min_bs    = 1.0
         elif g.chain == "base":
-            min_liq   = MIN_LIQ  # BASE giữ nguyên
+            min_liq   = MIN_LIQ
             min_score = MIN_SCORE
             max_rug   = MAX_RUG
             min_bs    = MIN_BS
-        else:  # ethereum
+        else:
             min_liq   = 20_000
             min_score = MIN_SCORE
             max_rug   = MAX_RUG
@@ -120,8 +120,16 @@ def apply_filters(gems):
         if g.vol_accel  < MIN_VA:                          continue
         if g.rug_risk   > max_rug:                         continue
         if g.phase in ("euphoric","dead","distribution"):  continue
-        if g.age_days < (MIN_AGE_H/24) and not g.breakout_candle:
-            continue
+
+        # AGE FILTER — ưu tiên 1-5 ngày
+        # Token < 1 ngày: chỉ alert nếu có breakout candle rõ ràng
+        if g.age_days < 1.0:
+            if not g.breakout_candle:
+                continue   # skip token < 1d không có breakout
+            # Có breakout nhưng < 1d: cần score cao hơn
+            if g.pre_pump_score < min_score + 1.5:
+                continue
+
         out.append(g)
     return out
 

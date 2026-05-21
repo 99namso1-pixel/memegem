@@ -54,6 +54,13 @@ def build_alert(gem, rank=1):
         f"📛 {gem.name}",
         f"",
         *(
+            [f"🎯 AGE: {gem.age_days:.1f}d — SWEET SPOT (1-5d)", f""]
+            if 1.0 <= gem.age_days <= 5.0
+            else [f"⏳ AGE: {gem.age_days*24:.0f}h — token mới <1d", f""]
+            if gem.age_days < 1.0
+            else []
+        ),
+        *(
             [f"🚨 BREAKOUT CANDLE — {getattr(gem,'flat_base_hours',0)}h tích lũy VỪA VỠ!",
              f"{'─'*36}", f""]
             if getattr(gem,'breakout_candle',False) and getattr(gem,'flat_base',False)
