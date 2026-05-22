@@ -100,6 +100,8 @@ class Gem:
     target2:str=""; target2_x:float=0; target2_mc:float=0; target2_days:str=""
     target3:str=""; target3_x:float=0; target3_mc:float=0; target3_days:str=""
     peak_estimate:str=""; peak_x:float=0; peak_days:str=""
+    x20_mc:float=0; x20_days:str=""; x20_feasible:bool=False
+    x20_prob:int=0; x20_target:str=""
     success_rate_tp1:int=0; success_rate_tp2:int=0; success_rate_tp3:int=0
     median_peak_x:float=0; best_case_x:float=0
     hold_period:str=""; risk_reward:str=""
@@ -196,14 +198,34 @@ def calc_trade_plan(gd:dict) -> dict:
     t3_x=max(t2_x+5, round(base_p75*0.8,1))
     pk_x=max(t3_x+5, round(base_p75,1))
 
-    spd=1.0
-    if p1h>30: spd=0.3
-    elif p1h>10: spd=0.6
-    elif va>4: spd=0.4
-    d1=max(0.03,pd["days_tp1"]*chain_spd*spd)
-    d2=max(d1+0.05,pd["days_tp2"]*chain_spd*spd)
-    d3=max(d2+0.1,pd["days_tp3"]*chain_spd*spd)
-    dpk=max(d3+0.2,pd["days_peak"]*chain_spd*spd)
+    # x20 target trong 7 ngày — dựa trên pattern thực tế
+    # SURPLUS: $212K → $7M = 33x/1 ngày
+    # VIRL: $212K → $6M = 28x/2 ngày
+    # Calibrate: x20 trong 7 ngày là target realistic cho 1-5d tokens
+    age_d = gd.get("age_days", 999)   # lấy từ dict
+    x20_mc      = mc * 20
+    x20_feasible= (
+        al in ("extreme","heavy") and
+        mc < 1_000_000 and
+        age_d <= 5.0
+    )
+    x20_days    = 7.0
+
+    # Fixed time: TP3=7d, TP2=4d, TP1=2d, Peak=14d
+    d1  = 2.0   # TP1 ~2 ngày
+    d2  = 4.0   # TP2 ~4 ngày
+    d3  = 7.0   # TP3 ~7 ngày (x20)
+    dpk = 14.0  # Peak ~14 ngày
+
+    # x20 probability estimate
+    x20_prob = 0
+    if x20_feasible:
+        if al == "extreme": x20_prob = 45
+        elif al == "heavy": x20_prob = 30
+        else:               x20_prob = 15
+        # Boost nếu micro cap
+        if mc < 200_000:    x20_prob = min(65, x20_prob + 15)
+        elif mc < 500_000:  x20_prob = min(55, x20_prob + 8)
 
     plan.update({
         "target1":f"TP1: {t1_x}x → MC {fmt_usd(mc*t1_x)} | Sell 35% | ETA {fmt_days(d1)}",
@@ -214,6 +236,12 @@ def calc_trade_plan(gd:dict) -> dict:
         "target3_x":t3_x,"target3_mc":mc*t3_x,"target3_days":fmt_days(d3),
         "peak_estimate":f"PEAK est: {pk_x}x → MC {fmt_usd(mc*pk_x)} | Moon bag 10% | ETA {fmt_days(dpk)}",
         "peak_x":pk_x,"peak_days":fmt_days(dpk),
+        # x20 trong 7 ngày
+        "x20_mc":       x20_mc,
+        "x20_days":     fmt_days(x20_days),
+        "x20_feasible": x20_feasible,
+        "x20_prob":     x20_prob,
+        "x20_target":   f"🎯 x20 TARGET: MC {fmt_usd(x20_mc)} trong {fmt_days(x20_days)} — xác suất {x20_prob}%",
         "median_peak_x":round(base_peak,1),"best_case_x":round(base_p75,1),
         "success_rate_tp1":pd["success_tp1"],"success_rate_tp2":pd["success_tp2"],
         "success_rate_tp3":pd["success_tp3"],
@@ -341,6 +369,8 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     if mc < 10_000:     return None
     if p24h > 900:      return None
     if p24h < -80:      return None
+    if vol24 < 3_000:   return None   # dead coin: vol < $3K/ngày
+    if age_days > 30:   return None   # quá cũ + MC thấp = dead
     # Liq filter theo chain
     if chain == "solana":
         # PumpSwap/PumpFun: liq thấp hơn nhiều vì pool SOL nhỏ
@@ -403,11 +433,27 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     if price_flat_6h and price_flat_24h and vol_quiet_6h:
         flat_base=True; flat_base_hours=12; flat_base_score+=2.5
         if vol_spike_1h: flat_base_score+=1.5; flat_base_hours=8
-        if breakout_candle: flat_base_score+=2.5
+        if breakout_candle: flat_base_score+=3.0  # tăng lên để alert ngay
     elif abs(p6h)<30 and (vol6/max(vol24,1))<0.50 and bs24>1.5:
         flat_base=True; flat_base_hours=6; flat_base_score+=1.5
         if vol_spike_1h: flat_base_score+=1.0
-        if breakout_candle: flat_base_score+=2.0
+        if breakout_candle: flat_base_score+=2.5
+
+    # STRONG BREAKOUT — vol đột biến cực mạnh từ vùng tích lũy
+    # Alert NGAY bất kể flat_base có detect được không
+    strong_breakout = (
+        va >= 5.0 and              # vol tăng 5x+ = cực mạnh
+        p1h >= 20 and              # giá 1h tăng > 20%
+        p1h < 300 and              # chưa quá muộn
+        liq >= 30_000 and          # liq đủ
+        age_days >= 0.33           # đã qua 8h
+    )
+    if strong_breakout and not flat_base:
+        flat_base=True
+        flat_base_hours=int(age_days*24)
+        flat_base_score+=4.0       # score cao để luôn alert ngay
+        breakout_candle=True       # force breakout = True
+        signals.insert(0, f"🚨 STRONG BREAKOUT: Vol {va:.1f}x + Giá +{p1h:.0f}% — ALERT NGAY!")
 
     # ── STEALTH ACCUMULATION DETECTION ──
     # Pattern: MANIFEST ngày 17 May — whale gom âm thầm
@@ -539,19 +585,18 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     elif lmc>=0.1:total+=1.0; signals.append(f"💧 Liq {lmc*100:.0f}% MC — OK")
     elif liq>=100_000: total+=0.5
 
-    # Age scoring — ưu tiên 1-5 ngày (VIRL/MANIFEST/TOLYBOT pattern)
-    if 1.0 <= age_days <= 5.0:
-        total+=2.0; signals.append(f"🎯 Token {age_days:.1f}d — SWEET SPOT 1-5d, pump potential cao nhất")
+    # Age scoring — loại < 8h, sweet spot 1-5d
+    if age_days < 0.33:            # < 8h = loại hoàn toàn
+        return None                # hard filter ngay tại đây
+    elif 1.0 <= age_days <= 5.0:
+        total+=2.5; signals.append(f"🎯 Token {age_days:.1f}d — SWEET SPOT 1-5d")
     elif 5.0 < age_days <= 14.0:
-        total+=1.0; signals.append(f"📅 Token {int(age_days)}d — mature, still ok")
-    elif 0.5 <= age_days < 1.0:
-        total+=0.0  # neutral — chưa đủ 1 ngày
-        signals.append(f"⏳ Token {age_days*24:.0f}h — chưa đủ 1d, chờ thêm")
-    elif age_days < 0.5:
-        total-=1.5  # penalize < 12h
-        warnings.append(f"⚠️ Token {age_days*24:.0f}h — quá mới, rủi ro cao")
+        total+=1.0; signals.append(f"📅 Token {int(age_days)}d — mature")
+    elif 0.33 <= age_days < 1.0:
+        total-=1.0                 # 8h-24h: penalize nhẹ
+        warnings.append(f"⏳ Token {age_days*24:.0f}h — chưa đủ 1d")
     elif age_days > 30:
-        total-=0.5  # token quá cũ mà MC vẫn thấp = suspect
+        total-=0.5
 
     # Price action
     if 0<=p24h<=15:    total+=1.5; signals.append("😴 Giá flat — chưa ai biết")
@@ -670,6 +715,9 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
         target3=tp["target3"],target3_x=tp["target3_x"],
         target3_mc=tp["target3_mc"],target3_days=tp["target3_days"],
         peak_estimate=tp["peak_estimate"],peak_x=tp["peak_x"],peak_days=tp["peak_days"],
+        x20_mc=tp.get("x20_mc",0),x20_days=tp.get("x20_days",""),
+        x20_feasible=tp.get("x20_feasible",False),x20_prob=tp.get("x20_prob",0),
+        x20_target=tp.get("x20_target",""),
         success_rate_tp1=tp["success_rate_tp1"],
         success_rate_tp2=tp["success_rate_tp2"],
         success_rate_tp3=tp["success_rate_tp3"],
@@ -805,16 +853,18 @@ def hunt_sync(chains:list) -> list:
     # 6. Keyword search — expanded để bắt TSG-class
     keywords=["new","pump","ai","dog","cat","inu","moon","pepe","based",
               "giant","sleep","world","trump","elon","baby","doge",
-              "shib","chad","wagmi","the","coin","token","eth","sol",
-              "base","frog","bird","fish","meme","gem","100x","1000x",
-              "grok","meta","agent","game","nft","dao","defi","swap"]
-    for q in keywords[:20]:
+              "shib","chad","wagmi","coin","token","eth","sol","base",
+              "frog","bird","fish","meme","gem","grok","meta","agent",
+              "game","nft","dao","defi","swap","surplus","intelligence",
+              "protocol","finance","labs","capital","network","tech",
+              "bot","fun","gg","xyz","wtf","lol","ape","alpha","based"]
+    for q in keywords[:25]:
         data=dex_get(f"/latest/dex/search?q={q}")
         pairs=(data or {}).get("pairs",[])
         micro=[p for p in pairs
                if 8_000<=(p.get("fdv") or p.get("marketCap") or 0)<=3_000_000
                and (p.get("liquidity") or {}).get("usd",0)>=5_000]
-        all_pairs.extend(micro[:15]); time.sleep(0.15)
+        all_pairs.extend(micro[:20]); time.sleep(0.15)
 
     # 7. GMGN tokens — SOL new pairs qua GMGN (bắt PumpFun/PumpSwap gems)
     gmgn_tokens=[]

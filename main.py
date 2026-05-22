@@ -120,15 +120,25 @@ def apply_filters(gems):
         if g.vol_accel  < MIN_VA:                          continue
         if g.rug_risk   > max_rug:                         continue
         if g.phase in ("euphoric","dead","distribution"):  continue
+        # Vol tối thiểu — loại dead coins như DOGE/CRONOS ($911/ngày)
+        min_vol = 5_000 if g.chain == "solana" else 10_000
+        if g.vol24 < min_vol:                              continue
+        # Age tối đa 30 ngày — token quá cũ mà MC thấp = dead
+        if g.age_days > 30:                                continue
 
-        # AGE FILTER — ưu tiên 1-5 ngày
-        # Token < 1 ngày: chỉ alert nếu có breakout candle rõ ràng
+        # AGE FILTER
+        # < 8h = loại hoàn toàn (đã hard filter trong scanner, backup ở đây)
+        if g.age_days < 0.33:
+            continue
+
+        # 8h-24h: chỉ alert nếu STRONG BREAKOUT (va>=5x + p1h>=20%)
         if g.age_days < 1.0:
             if not g.breakout_candle:
-                continue   # skip token < 1d không có breakout
-            # Có breakout nhưng < 1d: cần score cao hơn
-            if g.pre_pump_score < min_score + 1.5:
                 continue
+            if g.vol_accel < 5.0 and g.p1h < 20:
+                continue  # không đủ mạnh
+
+        # ≥ 1d: alert bình thường theo score
 
         out.append(g)
     return out
