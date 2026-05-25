@@ -51,7 +51,7 @@ logger = logging.getLogger("GemHunter")
 # ── Config ──
 BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
-CHAINS     = os.getenv("CHAINS", "solana,base,ethereum").split(",")
+CHAINS     = os.getenv("CHAINS", "base").split(",")
 GMGN_KEY   = os.getenv("GMGN_API_KEY", "")
 
 # Set GMGN API key ngay khi load
