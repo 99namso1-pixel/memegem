@@ -101,7 +101,12 @@ def apply_filters(gems):
             min_liq   = MIN_LIQ
             min_score = MIN_SCORE
             max_rug   = MAX_RUG
-            min_bs    = MIN_BS
+            # Nới B/S nếu có breakout signal mạnh (vol_accel cao)
+            # SIGNA: B/S 0.8x nhưng vol_accel 2.4x + p1h +35%
+            if g.breakout_candle or g.vol_accel >= 2.5:
+                min_bs = 0.7   # whale kìm giá = sells > buys là bình thường
+            else:
+                min_bs = MIN_BS
         elif g.chain == "ethereum":
             min_liq   = 15_000
             min_score = MIN_SCORE

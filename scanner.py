@@ -478,6 +478,27 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     good_liq       = liq >= 50_000               # liq tốt = có whale gom được
     vol_vs_liq     = vmc >= 0.2                  # vol đủ lớn so với MC (0.2 = $200K vol / $1M MC)
 
+    # HIDDEN GEM pattern — SIGNA class
+    # MC rất nhỏ + liq/MC ratio tốt + age 1-5d = đang bị bỏ qua
+    # Không cần B/S cao, chỉ cần: nhỏ + liq đủ + chưa pump
+    hidden_gem = (
+        mc < 500_000 and               # MC nhỏ (nới từ 200K → 500K)
+        lmc >= 0.10 and                # liq ≥ 10% MC
+        age_days >= 0.5 and            # ≥ 12h
+        age_days <= 10.0 and           # ≤ 10 ngày
+        abs(p24h) < 100 and            # chưa pump điên
+        liq >= 10_000 and              # liq tối thiểu
+        not post_ath_dump
+    )
+    if hidden_gem and not stealth_accum and not flat_base:
+        stealth_accum = True
+        stealth_score = 2.0
+        flat_base_hours = int(age_days * 24)
+        signals.append(f"💎 HIDDEN GEM: MC {fmt_usd(mc)} + Liq {lmc*100:.0f}% MC — chưa ai biết")
+        if lmc >= 0.3:
+            stealth_score += 1.0
+            signals.append(f"💧 Liq/MC {lmc*100:.0f}% — rất tốt cho MC nhỏ")
+
     # Dead Vol Accumulation — AGENT pattern
     # Vol cực thấp nhiều ngày + giá flat + liq tốt = whale hold, chờ catalyst
     dead_vol_accum = (
@@ -590,8 +611,15 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     elif liq>=100_000: total+=0.5
 
     # Age scoring — loại < 8h, sweet spot 1-5d
-    if age_days < 0.33:            # < 8h = loại hoàn toàn
-        return None                # hard filter ngay tại đây
+    if age_days < 0.33:            # < 8h — chỉ pass nếu STRONG BREAKOUT + liq cao
+        # $hey stock pattern: 6h tuổi nhưng vol $3.7M + liq $104K
+        ultra_early_ok = (
+            liq >= 50_000 and          # liq tốt = không phải rug
+            vol24 >= 100_000 and       # vol cực lớn = có người mua thật
+            p1h >= 30                  # giá đang tăng mạnh
+        )
+        if not ultra_early_ok:
+            return None                # loại nếu không đủ điều kiện
     elif 1.0 <= age_days <= 5.0:
         total+=2.5; signals.append(f"🎯 Token {age_days:.1f}d — SWEET SPOT 1-5d")
     elif 5.0 < age_days <= 14.0:
@@ -642,7 +670,11 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     if liq<20_000:   warnings.append(f"⚠️ Liq thấp ${fmt_usd(liq)}")
     if lmc<0.05:     warnings.append("⚠️ Liq/MC <5%")
     if age_days<0.08:warnings.append("⚠️ Token <2h — quá mới")
-    if bs24<0.8:     warnings.append("🚨 Sells>Buys")
+    if bs24 < 0.8 and not breakout_candle:
+        warnings.append("🚨 Sells>Buys — không phải accumulation")
+        total -= 1.5
+    elif bs24 < 1.0 and breakout_candle:
+        signals.append(f"⚡ Sells>Buys nhưng BREAKOUT mạnh — whale kìm giá xong")
     if p24h>400:     warnings.append("🚨 Đã pump >400%")
     if mc<100_000 and liq<15_000: warnings.append("🚨 Ultra micro + liq thấp = rug risk cao")
 
