@@ -369,8 +369,9 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     if mc < 10_000:     return None
     if p24h > 900:      return None
     if p24h < -80:      return None
-    if vol24 < 3_000:   return None   # dead coin: vol < $3K/ngày
-    if age_days > 30:   return None   # quá cũ + MC thấp = dead
+    if vol24 < 3_000:   return None
+    if age_days > 30:   return None
+    if chain != "base": return None   # chỉ BASE chain
     # Liq filter theo chain
     if chain == "solana":
         # PumpSwap/PumpFun: liq thấp hơn nhiều vì pool SOL nhỏ
@@ -442,11 +443,11 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     # STRONG BREAKOUT — vol đột biến cực mạnh từ vùng tích lũy
     # Alert NGAY bất kể flat_base có detect được không
     strong_breakout = (
-        va >= 5.0 and              # vol tăng 5x+ = cực mạnh
-        p1h >= 20 and              # giá 1h tăng > 20%
-        p1h < 300 and              # chưa quá muộn
-        liq >= 30_000 and          # liq đủ
-        age_days >= 0.33           # đã qua 8h
+        va >= 3.0 and              # vol tăng 3x+ (giảm từ 5x)
+        p1h >= 15 and              # giá 1h > 15% (giảm từ 20%)
+        p1h < 500 and
+        liq >= 20_000 and          # liq đủ (giảm từ 30K)
+        age_days >= 0.33
     )
     if strong_breakout and not flat_base:
         flat_base=True
@@ -591,7 +592,7 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     elif 1.0 <= age_days <= 5.0:
         total+=2.5; signals.append(f"🎯 Token {age_days:.1f}d — SWEET SPOT 1-5d")
     elif 5.0 < age_days <= 14.0:
-        total+=1.0; signals.append(f"📅 Token {int(age_days)}d — mature")
+        total+=1.5; signals.append(f"📅 Token {int(age_days)}d — accumulation zone")
     elif 0.33 <= age_days < 1.0:
         total-=1.0                 # 8h-24h: penalize nhẹ
         warnings.append(f"⏳ Token {age_days*24:.0f}h — chưa đủ 1d")
@@ -747,13 +748,15 @@ def hunt_sync(chains:list) -> list:
         data=dex_get(f"/latest/dex/pairs/{chain}")
         new_pairs=(data.get("pairs",[]) if isinstance(data,dict) else data) or []
 
-        # Uniswap V4 specifically (BASEMAXXING deploy ở đây)
+        # Uniswap V2/V3/V4 — BASE có cả 3 versions
         if chain in ("base","ethereum"):
-            v4_data=dex_get(f"/latest/dex/pairs/{chain}/uniswap-v4")
-            if v4_data:
-                v4_pairs=(v4_data.get("pairs",[]) if isinstance(v4_data,dict) else v4_data) or []
-                new_pairs.extend(v4_pairs)
-                logger.debug(f"Uniswap V4 {chain}: {len(v4_pairs)} pairs")
+            for dex_ver in ["uniswap-v4", "uniswap-v3", "uniswap-v2"]:
+                vx_data=dex_get(f"/latest/dex/pairs/{chain}/{dex_ver}")
+                if vx_data:
+                    vx_pairs=(vx_data.get("pairs",[]) if isinstance(vx_data,dict) else vx_data) or []
+                    new_pairs.extend(vx_pairs)
+                    logger.debug(f"{dex_ver} {chain}: {len(vx_pairs)} pairs")
+                time.sleep(0.1)
 
         # Aerodrome (BASE native DEX — nhiều gem)
         if chain == "base":
