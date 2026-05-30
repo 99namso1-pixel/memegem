@@ -51,7 +51,7 @@ logger = logging.getLogger("GemHunter")
 # ── Config ──
 BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
-CHAINS     = os.getenv("CHAINS", "base").split(",")
+CHAINS     = os.getenv("CHAINS", "base,ethereum,solana,bsc").split(",")
 GMGN_KEY   = os.getenv("GMGN_API_KEY", "")
 
 # Set GMGN API key ngay khi load
@@ -96,19 +96,29 @@ def cleanup_seen(seen, ttl_hours=3):  # giảm TTL 6h→3h, re-alert sớm hơn
 def apply_filters(gems):
     out = []
     for g in gems:
-        # Chain-specific thresholds
-        if g.chain == "solana":
-            min_liq   = 10_000
-            min_score = MIN_SCORE - 0.5
-            max_rug   = MAX_RUG + 0.5
-            min_bs    = 1.0
-        elif g.chain == "base":
+        # Chain-specific thresholds — BASE cao nhất, BSC thấp nhất
+        if g.chain == "base":
             min_liq   = MIN_LIQ
             min_score = MIN_SCORE
             max_rug   = MAX_RUG
             min_bs    = MIN_BS
+        elif g.chain == "ethereum":
+            min_liq   = 15_000
+            min_score = MIN_SCORE
+            max_rug   = MAX_RUG
+            min_bs    = MIN_BS
+        elif g.chain == "solana":
+            min_liq   = 10_000
+            min_score = MIN_SCORE - 0.5
+            max_rug   = MAX_RUG + 0.5
+            min_bs    = 1.0
+        elif g.chain == "bsc":
+            min_liq   = 10_000
+            min_score = MIN_SCORE - 0.5
+            max_rug   = MAX_RUG + 0.5
+            min_bs    = 1.0
         else:
-            min_liq   = 20_000
+            min_liq   = MIN_LIQ
             min_score = MIN_SCORE
             max_rug   = MAX_RUG
             min_bs    = MIN_BS
@@ -120,8 +130,12 @@ def apply_filters(gems):
         if g.vol_accel  < MIN_VA:                          continue
         if g.rug_risk   > max_rug:                         continue
         if g.phase in ("euphoric","dead","distribution"):  continue
-        # Vol tối thiểu — loại dead coins như DOGE/CRONOS ($911/ngày)
-        min_vol = 5_000 if g.chain == "solana" else 10_000
+        # Vol tối thiểu theo chain
+        if g.chain == "base":      min_vol = 10_000
+        elif g.chain == "ethereum":min_vol = 8_000
+        elif g.chain == "solana":  min_vol = 5_000
+        elif g.chain == "bsc":     min_vol = 5_000
+        else:                      min_vol = 8_000
         if g.vol24 < min_vol:                              continue
         # Age tối đa 30 ngày — token quá cũ mà MC thấp = dead
         if g.age_days > 30:                                continue

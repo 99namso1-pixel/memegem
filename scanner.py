@@ -371,16 +371,19 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     if p24h < -80:      return None
     if vol24 < 3_000:   return None
     if age_days > 30:   return None
-    if chain != "base": return None   # chỉ BASE chain
+    if chain not in ("base","ethereum","solana","bsc"): return None
     # Liq filter theo chain
     if chain == "solana":
-        # PumpSwap/PumpFun: liq thấp hơn nhiều vì pool SOL nhỏ
-        min_liq = 3_000  if mc < 50_000   else                   5_000  if mc < 200_000  else                   8_000  if mc < 500_000  else 15_000
+        min_liq = 3_000 if mc<50_000 else 5_000 if mc<200_000 else 8_000 if mc<500_000 else 15_000
     elif chain == "base":
-        min_liq = 10_000 if mc < 100_000  else                   20_000 if mc < 500_000  else 30_000
-    else:  # ethereum
-        min_liq = 8_000  if mc < 100_000  else                   15_000 if mc < 500_000  else 25_000
-    if liq < min_liq:   return None
+        min_liq = 10_000 if mc<100_000 else 20_000 if mc<500_000 else 30_000
+    elif chain == "ethereum":
+        min_liq = 8_000 if mc<100_000 else 15_000 if mc<500_000 else 25_000
+    elif chain == "bsc":
+        min_liq = 5_000 if mc<100_000 else 10_000 if mc<500_000 else 20_000
+    else:
+        min_liq = 10_000
+        if liq < min_liq:   return None
 
     total=0.0; signals=[]; warnings=[]
     bs24=(buys24/sells24) if sells24>0 else (9.0 if buys24>0 else 1.0)
@@ -616,20 +619,24 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
         total -= 0.5
         warnings.append(f"⚠️ Token {int(age_days)}d tuổi + MC thấp — có thể đã pump/dump rồi")
 
-    # Chain priority bonus — BASE > ETH > SOL
+    # Chain priority bonus — BASE > ETH > SOL > BSC
     if chain == "base":
         if mc < 500_000:
-            total += 1.5; signals.append("🔵 BASE micro — TSG/MOLT class, highest priority")
+            total += 1.5; signals.append("🔵 BASE micro — highest priority")
         else:
-            total += 1.0; signals.append("🔵 BASE chain — high pump potential")
+            total += 1.0; signals.append("🔵 BASE chain")
     elif chain == "ethereum":
         if mc < 500_000:
-            total += 1.0; signals.append("Ξ ETH micro — AEON/JUNO class")
+            total += 1.2; signals.append("Ξ ETH micro — CALI/AEON class")
         else:
-            total += 0.5; signals.append("Ξ ETH chain")
+            total += 0.8; signals.append("Ξ ETH chain")
     elif chain == "solana":
-        total += 0.3; signals.append("◎ SOL chain")
-    # BSC/others không bonus
+        if mc < 500_000:
+            total += 1.0; signals.append("◎ SOL micro — VIRL/MANIFEST class")
+        else:
+            total += 0.5; signals.append("◎ SOL chain")
+    elif chain == "bsc":
+        total += 0.3; signals.append("🟡 BSC chain")
 
     # ── WARNINGS ──
     if liq<20_000:   warnings.append(f"⚠️ Liq thấp ${fmt_usd(liq)}")
@@ -773,26 +780,22 @@ def hunt_sync(chains:list) -> list:
         logger.debug(f"New pairs {chain}: {len(early)} (liq>$30K)")
         time.sleep(0.15)
 
-    # 3. BASE/ETH Gainers — BASE trước, ETH sau
-    chain_order = [c for c in ["base","ethereum"] if c in chains]
+    # 3. Gainers/Trending — BASE > ETH > SOL > BSC
+    chain_order = [c for c in ["base","ethereum","solana","bsc"] if c in chains]
     for chain in chain_order:
         endpoints = [
             f"/latest/dex/tokens/{chain}/gainers",
-            f"/latest/dex/pairs/{chain}/new",
+            f"/latest/dex/tokens/{chain}/trending",
         ]
-        # Thêm Uniswap V4 gainers riêng
-        if chain in ("base","ethereum"):
-            endpoints.append(f"/latest/dex/tokens/{chain}/trending")
-
         for endpoint in endpoints:
             data=dex_get(endpoint)
             pairs=(data.get("pairs",[]) if isinstance(data,dict)
                    else data if isinstance(data,list) else []) or []
-            # Filter chặt: liq > $30K để loại rug
+            min_liq = 20_000 if chain=="base" else 15_000 if chain=="ethereum" else 8_000
             filtered=[p for p in pairs
-                      if 15_000<=(p.get("fdv") or p.get("marketCap") or 0)<=5_000_000
-                      and (p.get("liquidity") or {}).get("usd",0)>=30_000]
-            all_pairs.extend(filtered[:30])
+                      if 10_000<=(p.get("fdv") or p.get("marketCap") or 0)<=10_000_000
+                      and (p.get("liquidity") or {}).get("usd",0)>=min_liq]
+            all_pairs.extend(filtered[:25])
             time.sleep(0.15)
 
     # 4. Token profiles (boosted)
@@ -922,7 +925,7 @@ def hunt_sync(chains:list) -> list:
             gems.append(gem)
 
     # Sort: BASE > ETH > SOL + age 1-5d ưu tiên + breakout + score
-    chain_rank = {"base": 0, "ethereum": 1, "solana": 2}
+    chain_rank = {"base": 0, "ethereum": 1, "solana": 2, "bsc": 3}
 
     def age_rank(g):
         # 1-5d = 0 (tốt nhất), <1d = 1, 5-14d = 2, >14d = 3
