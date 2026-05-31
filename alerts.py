@@ -63,19 +63,39 @@ def build_alert(gem, rank=1):
     else:
         age_str = f"{int(gem.age_days)}d"
 
+    # Short dex link
+    dex_url = gem.dex_url or ""
+    if "dexscreener.com" in dex_url:
+        # shorten to dexscreener.com/base/0x1234...5678
+        parts = dex_url.rstrip("/").split("/")
+        addr_short = parts[-1][:6] + "..." + parts[-1][-4:] if len(parts[-1]) > 12 else parts[-1]
+        chain_part = parts[-2] if len(parts) >= 2 else gem.chain
+        short_url = f"dexscreener.com/{chain_part}/{addr_short}"
+    else:
+        short_url = dex_url
+
     lines = [
         f"💎 #{rank} {gem.trade_verdict}",
         f"${gem.ticker} {ce}{gem.chain.upper()} {pi}{gem.phase.upper()} | Age: {age_str}",
+        f'<a href="{gem.dex_url}">📊 Check Dexscreener</a>',
         f"",
     ]
 
-    # Breakout badge
+    # Age badge
+    if 1.0 <= gem.age_days <= 5.0:
+        lines.append(f"🎯 AGE: {gem.age_days:.1f}d — SWEET SPOT (1-5d)")
+    elif gem.age_days < 1.0:
+        lines.append(f"⏳ AGE: {gem.age_days*24:.0f}h — early")
+
+    # Breakout / Accumulation badge
     if getattr(gem,"breakout_candle",False) and gem.p1h >= 15:
-        lines.append(f"🚨 BREAKOUT: Vol {gem.vol_accel:.1f}x | +{gem.p1h:.0f}% 1h")
+        lines.append(f"🚨 BREAKOUT NOW: Vol {gem.vol_accel:.1f}x | +{gem.p1h:.0f}% 1h")
+    elif getattr(gem,"stealth_accum",False) and gem.vol_accel < 0.5:
+        lines.append(f"😴 DEAD VOL ACCUM {getattr(gem,'stealth_hours',0)}h — whale đang hold")
     elif getattr(gem,"stealth_accum",False):
-        lines.append(f"🐋 ACCUM {getattr(gem,'stealth_hours',0)}h | B/S {gem.bs_ratio24}x")
+        lines.append(f"🐋 STEALTH ACCUM {getattr(gem,'stealth_hours',0)}h | B/S {gem.bs_ratio24}x")
     elif getattr(gem,"flat_base",False):
-        lines.append(f"📦 FLAT BASE {getattr(gem,'flat_base_hours',0)}h")
+        lines.append(f"📦 FLAT BASE {getattr(gem,'flat_base_hours',0)}h — sắp breakout")
 
     lines += [
         f"",
@@ -138,11 +158,6 @@ def build_alert(gem, rank=1):
     for w in warn: lines.append(w)
     if sigs or warn: lines.append("")
 
-    # Link
-    lines.append(f"🔗 {gem.dex_url}")
-    if gem.chain == "solana":
-        lines.append(f"🦅 birdeye.so/token/{gem.address}")
-
     lines.append(f"⚠️ DYOR | High risk")
     return "\n".join(lines)
 
@@ -164,9 +179,17 @@ def build_summary(gems, scan_num, total):
 
 async def send_message(bot: Bot, chat_id: str, text: str):
     try:
-        await bot.send_message(chat_id=chat_id,text=text,disable_web_page_preview=True)
+        await bot.send_message(chat_id=chat_id, text=text,
+                               parse_mode="HTML",
+                               disable_web_page_preview=True)
     except Exception as e:
-        logger.error(f"send: {e}")
+        try:
+            import re
+            plain = re.sub(r'<[^>]+>', '', text)
+            await bot.send_message(chat_id=chat_id, text=plain,
+                                   disable_web_page_preview=True)
+        except Exception as e2:
+            logger.error(f"send: {e2}")
 
 async def send_gem_alerts(bot,chat_id,new_gems):
     for i,gem in enumerate(new_gems[:5],1):

@@ -205,9 +205,9 @@ def calc_trade_plan(gd:dict) -> dict:
     age_d = gd.get("age_days", 999)   # lấy từ dict
     x20_mc      = mc * 20
     x20_feasible= (
-        al in ("extreme","heavy") and
-        mc < 1_000_000 and
-        age_d <= 5.0
+        al in ("extreme","heavy","moderate") and
+        mc < 2_000_000 and
+        age_d <= 14.0  # nới từ 5d → 14d
     )
     x20_days    = 7.0
 
@@ -220,9 +220,14 @@ def calc_trade_plan(gd:dict) -> dict:
     # x20 probability estimate
     x20_prob = 0
     if x20_feasible:
-        if al == "extreme": x20_prob = 45
-        elif al == "heavy": x20_prob = 30
-        else:               x20_prob = 15
+        if al == "extreme":   x20_prob = 45
+        elif al == "heavy":   x20_prob = 30
+        elif al == "moderate":x20_prob = 15
+        else:                 x20_prob = 5
+        # Bonus MC nhỏ
+        if mc < 200_000:    x20_prob = min(65, x20_prob + 15)
+        elif mc < 500_000:  x20_prob = min(55, x20_prob + 8)
+        elif mc < 1_000_000:x20_prob = min(40, x20_prob + 3)
         # Boost nếu micro cap
         if mc < 200_000:    x20_prob = min(65, x20_prob + 15)
         elif mc < 500_000:  x20_prob = min(55, x20_prob + 8)
@@ -365,13 +370,19 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     chain=(pair.get("chainId") or "").lower()
 
     # ── Hard filters ──
-    if mc > 15_000_000: return None
-    if mc < 10_000:     return None
-    if p24h > 900:      return None
-    if p24h < -80:      return None
-    if vol24 < 3_000:   return None
-    if age_days > 30:   return None
+    if mc > 50_000_000:  return None
+    if mc < 1_000:       return None
     if chain not in ("base","ethereum","solana","bsc"): return None
+
+    # Breakout check TRƯỚC mọi filter — cứ breakout là pass
+    va_pre = (vol1/(vol6/6)) if vol6>0 and vol1>0 else 0.0
+    is_breakout_now = (va_pre >= 3.0 and p1h >= 15 and p1h < 1000)
+    if is_breakout_now:
+        if liq < 3_000: return None   # chỉ cần liq $3K khi breakout
+    else:
+        if vol24 < 3_000:  return None
+        if age_days > 30:  return None
+        if p24h < -80:     return None
     # Liq filter theo chain
     if chain == "solana":
         min_liq = 3_000 if mc<50_000 else 5_000 if mc<200_000 else 8_000 if mc<500_000 else 15_000

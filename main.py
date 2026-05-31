@@ -59,7 +59,7 @@ if GMGN_AVAILABLE and GMGN_KEY and gmgn_set_key:
     gmgn_set_key(GMGN_KEY)
 INTERVAL   = int(os.getenv("SCAN_INTERVAL_MINUTES", "2")) * 60
 MIN_SCORE  = float(os.getenv("MIN_SCORE", "5.5"))
-MIN_MC     = float(os.getenv("MIN_MC", "20000"))
+MIN_MC     = float(os.getenv("MIN_MC", "5000"))   # giảm xuống $5K
 MAX_MC     = float(os.getenv("MAX_MC", "10000000"))  # tăng lên 10M
 MIN_LIQ    = float(os.getenv("MIN_LIQUIDITY", "30000"))  # liq > $30K = ít rug
 MIN_BS     = float(os.getenv("MIN_BS_RATIO", "1.2"))
@@ -96,76 +96,41 @@ def cleanup_seen(seen, ttl_hours=3):  # giảm TTL 6h→3h, re-alert sớm hơn
 def apply_filters(gems):
     out = []
     for g in gems:
-        # Chain-specific thresholds — BASE cao nhất, BSC thấp nhất
-        if g.chain == "base":
-            min_liq   = MIN_LIQ
-            min_score = MIN_SCORE
-            max_rug   = MAX_RUG
-            # Nới B/S nếu có breakout signal mạnh (vol_accel cao)
-            # SIGNA: B/S 0.8x nhưng vol_accel 2.4x + p1h +35%
-            if g.breakout_candle or g.vol_accel >= 2.5:
-                min_bs = 0.7   # whale kìm giá = sells > buys là bình thường
-            else:
-                min_bs = MIN_BS
-        elif g.chain == "ethereum":
-            min_liq   = 15_000
-            min_score = MIN_SCORE
-            max_rug   = MAX_RUG
-            min_bs    = MIN_BS
-        elif g.chain == "solana":
-            min_liq   = 10_000
-            min_score = MIN_SCORE - 0.5
-            max_rug   = MAX_RUG + 0.5
-            min_bs    = 1.0
-        elif g.chain == "bsc":
-            min_liq   = 10_000
-            min_score = MIN_SCORE - 0.5
-            max_rug   = MAX_RUG + 0.5
-            min_bs    = 1.0
-        else:
-            min_liq   = MIN_LIQ
-            min_score = MIN_SCORE
-            max_rug   = MAX_RUG
-            min_bs    = MIN_BS
-
-        if g.pre_pump_score < min_score:                  continue
-        if g.mc < MIN_MC or g.mc > MAX_MC:                continue
-        if g.liq < min_liq:                                continue
-        if g.bs_ratio24 < min_bs:                          continue
-        if g.vol_accel  < MIN_VA:                          continue
-        if g.rug_risk   > max_rug:                         continue
-        if g.phase in ("euphoric","dead","distribution"):  continue
-        # Vol tối thiểu theo chain
-        if g.chain == "base":      min_vol = 10_000
-        elif g.chain == "ethereum":min_vol = 8_000
-        elif g.chain == "solana":  min_vol = 5_000
-        elif g.chain == "bsc":     min_vol = 5_000
-        else:                      min_vol = 8_000
-        if g.vol24 < min_vol:                              continue
-        # Age tối đa 30 ngày — token quá cũ mà MC thấp = dead
-        if g.age_days > 30:                                continue
-
-        # AGE FILTER
-        # < 8h = loại hoàn toàn (đã hard filter trong scanner, backup ở đây)
-        if g.age_days < 0.33:
+        # BREAKOUT = alert ngay, bypass tất cả filter
+        is_breakout = (
+            getattr(g,"breakout_candle",False) and
+            g.vol_accel >= 3.0 and
+            g.p1h >= 15
+        )
+        if is_breakout:
+            if g.liq >= 3_000:
+                out.append(g)
             continue
 
-        # 8h-24h: chỉ alert nếu STRONG BREAKOUT (va>=5x + p1h>=20%)
-        if g.age_days < 1.0:
-            if not g.breakout_candle:
+        # Không breakout → filter bình thường
+        if g.chain == "base":
+            min_liq=MIN_LIQ; min_score=MIN_SCORE; max_rug=MAX_RUG; min_bs=MIN_BS
+        elif g.chain == "ethereum":
+            min_liq=15_000; min_score=MIN_SCORE; max_rug=MAX_RUG; min_bs=MIN_BS
+        elif g.chain in ("solana","bsc"):
+            min_liq=10_000; min_score=MIN_SCORE-0.5; max_rug=MAX_RUG+0.5; min_bs=1.0
+        else:
+            min_liq=MIN_LIQ; min_score=MIN_SCORE; max_rug=MAX_RUG; min_bs=MIN_BS
+
+        if g.pre_pump_score < min_score:   continue
+        if g.mc < MIN_MC or g.mc > MAX_MC: continue
+        if g.liq < min_liq:                continue
+        if g.bs_ratio24 < min_bs:          continue
+        if g.vol_accel < MIN_VA:
+            if not (getattr(g,"stealth_accum",False) or getattr(g,"flat_base",False)):
                 continue
-            if g.vol_accel < 5.0 and g.p1h < 20:
-                continue  # không đủ mạnh
-
-        # ≥ 1d: alert bình thường theo score
-
+        if g.rug_risk > MAX_RUG:           continue
+        if g.phase in ("euphoric","dead","distribution"): continue
+        if g.age_days > 30:                continue
         out.append(g)
     return out
 
 
-# ─────────────────────────────────────────
-# GEM SCANNER LOOP
-# ─────────────────────────────────────────
 async def gem_scanner_loop(bot: Bot, seen: dict):
     scan_num = 0
     while True:
