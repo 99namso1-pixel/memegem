@@ -96,38 +96,18 @@ def cleanup_seen(seen, ttl_hours=3):  # giảm TTL 6h→3h, re-alert sớm hơn
 def apply_filters(gems):
     out = []
     for g in gems:
-        # BREAKOUT = alert ngay, bypass tất cả filter
-        is_breakout = (
+        # CHỈ ALERT KHI ĐÃ BREAKOUT THẬT SỰ
+        # Không alert "sắp breakout", "watch", "accumulation"
+        is_real_breakout = (
             getattr(g,"breakout_candle",False) and
-            g.vol_accel >= 3.0 and
-            g.p1h >= 15
+            g.vol_accel >= 3.0 and    # vol tăng 3x+
+            g.p1h >= 15 and           # giá 1h tăng 15%+
+            g.p1h < 500 and           # chưa quá muộn
+            g.p5m >= 0 and            # giá 5m không đang dump
+            g.liq >= 3_000            # liq tối thiểu
         )
-        if is_breakout:
-            if g.liq >= 3_000:
-                out.append(g)
-            continue
-
-        # Không breakout → filter bình thường
-        if g.chain == "base":
-            min_liq=MIN_LIQ; min_score=MIN_SCORE; max_rug=MAX_RUG; min_bs=MIN_BS
-        elif g.chain == "ethereum":
-            min_liq=15_000; min_score=MIN_SCORE; max_rug=MAX_RUG; min_bs=MIN_BS
-        elif g.chain in ("solana","bsc"):
-            min_liq=10_000; min_score=MIN_SCORE-0.5; max_rug=MAX_RUG+0.5; min_bs=1.0
-        else:
-            min_liq=MIN_LIQ; min_score=MIN_SCORE; max_rug=MAX_RUG; min_bs=MIN_BS
-
-        if g.pre_pump_score < min_score:   continue
-        if g.mc < MIN_MC or g.mc > MAX_MC: continue
-        if g.liq < min_liq:                continue
-        if g.bs_ratio24 < min_bs:          continue
-        if g.vol_accel < MIN_VA:
-            if not (getattr(g,"stealth_accum",False) or getattr(g,"flat_base",False)):
-                continue
-        if g.rug_risk > MAX_RUG:           continue
-        if g.phase in ("euphoric","dead","distribution"): continue
-        if g.age_days > 30:                continue
-        out.append(g)
+        if is_real_breakout:
+            out.append(g)
     return out
 
 

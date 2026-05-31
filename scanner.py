@@ -376,7 +376,12 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
 
     # Breakout check TRƯỚC mọi filter — cứ breakout là pass
     va_pre = (vol1/(vol6/6)) if vol6>0 and vol1>0 else 0.0
-    is_breakout_now = (va_pre >= 3.0 and p1h >= 15 and p1h < 1000)
+    is_breakout_now = (
+        va_pre >= 3.0 and
+        p1h >= 15 and p1h < 1000 and
+        p5m >= 0 and               # không đang dump
+        p6h >= 0                   # 6h không âm nhiều
+    )
     if is_breakout_now:
         if liq < 3_000: return None   # chỉ cần liq $3K khi breakout
     else:
@@ -457,11 +462,13 @@ def score_gem(pair:dict, boost_map:dict) -> Optional[Gem]:
     # STRONG BREAKOUT — vol đột biến cực mạnh từ vùng tích lũy
     # Alert NGAY bất kể flat_base có detect được không
     strong_breakout = (
-        va >= 3.0 and              # vol tăng 3x+ (giảm từ 5x)
-        p1h >= 15 and              # giá 1h > 15% (giảm từ 20%)
+        va >= 3.0 and
+        p1h >= 15 and
         p1h < 500 and
-        liq >= 20_000 and          # liq đủ (giảm từ 30K)
-        age_days >= 0.33
+        p5m >= 0 and               # 5m không đang dump
+        p6h >= 5 and               # 6h cũng đang tăng
+        liq >= 5_000 and
+        age_days >= 0.08           # ít nhất 2h tuổi
     )
     if strong_breakout and not flat_base:
         flat_base=True
